@@ -3,6 +3,8 @@
  * and restores the GL state it touches, so PsyCross's rendering is unaffected. */
 #include "overlay.h"
 
+#include <algorithm>
+
 #include <SDL.h>
 #include <float.h>
 #include <string.h>
@@ -195,13 +197,14 @@ static void note_focus(const char *label) {
 static void draw_menu(const ImGuiViewport *vp) {
     Settings *s = s_settings;
     int apply = 0;
-    float ui = vp->WorkSize.y / 540.0f; /* sized to the window */
+    float ui = std::min(vp->WorkSize.y / 540.0f, vp->WorkSize.x / 640.0f); /* sized to the window */
     ui = ui < 1.0f ? 1.0f : ui;
+    const float width = std::min(600.0f * ui, vp->WorkSize.x * 0.98f);
     ImGui::PushFont(nullptr, 15.0f * ui);
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(460.0f * ui, 0.0f), ImVec2(460.0f * ui, vp->WorkSize.y * 0.95f));
-    ImGui::SetNextWindowSize(ImVec2(460.0f * ui, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0.0f), ImVec2(width, vp->WorkSize.y * 0.95f));
+    ImGui::SetNextWindowSize(ImVec2(width, 0.0f), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.92f);
     bool open = true;
     ImGui::Begin("Settings (F1)", &open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
