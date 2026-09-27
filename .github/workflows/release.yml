@@ -1,0 +1,57 @@
+# Builds the three release packages and attaches them to a draft GitHub release.
+# Run by hand (Actions, release, Run workflow). The packages contain the client
+# only: players import their own discs.
+name: release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install ninja
+      - run: port/tools/package_macos.sh
+      - uses: actions/upload-artifact@v4
+        with: {name: lain-macos, path: dist/Lain-macos.zip}
+
+  windows-and-linux:
+    # Both packages build in Docker containers (MinGW-w64 cross-compile for
+    # Windows, Ubuntu 22.04 for Linux), the same way as locally.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: port/tools/package_windows.sh
+      - run: port/tools/package_linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lain-windows-linux
+          path: |
+            dist/Lain-windows.zip
+            dist/Lain-linux-x86_64.tar.gz
+
+  release:
+    needs: [macos, windows-and-linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {path: packages, merge-multiple: true}
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          tag_name: ${{ format('build-{0}', github.run_number) }}
+          files: |
+            packages/Lain-macos.zip
+            packages/Lain-windows.zip
+            packages/Lain-linux-x86_64.tar.gz
+          body: |
+            Native client for Serial Experiments Lain (PlayStation, Japan). No game data included.
+            On first launch, add your own dumps of both discs (.cue/.bin).
+
+            - macOS (Apple Silicon): unzip and open Lain.app. It is unsigned: right-click, Open the first time.
+            - Windows 10/11: unzip and run lain.exe. It is unsigned: if SmartScreen warns, choose More info, Run anyway.
+            - Linux (x86-64, glibc 2.35+, OpenGL 3.2): extract and run ./lain.

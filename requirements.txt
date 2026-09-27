@@ -1,0 +1,3 @@
+splat64[mips]
+spimdisasm
+rabbitizer

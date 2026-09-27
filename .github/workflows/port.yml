@@ -1,0 +1,41 @@
+# Builds the native client on all three desktop platforms. No game data is
+# needed to build: the client reads the player's own disc dumps at runtime.
+name: native client
+
+on:
+  push:
+    branches: [main]
+    paths: ["port/**", ".github/workflows/port.yml"]
+  pull_request:
+    paths: ["port/**", ".github/workflows/port.yml"]
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install sdl2 openal-soft ninja
+      - run: cmake -S port -B build/port -G Ninja -DCMAKE_BUILD_TYPE=Release -DLAIN_STATIC_DEPS=ON
+      - run: cmake --build build/port
+      - uses: actions/upload-artifact@v4
+        with: {name: lain-macos-arm64, path: build/port/lain}
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libsdl2-dev libopenal-dev libgl-dev ninja-build
+      - run: cmake -S port -B build/port -G Ninja -DCMAKE_BUILD_TYPE=Release -DLAIN_STATIC_DEPS=ON
+      - run: cmake --build build/port
+      - uses: actions/upload-artifact@v4
+        with: {name: lain-linux-x64, path: build/port/lain}
+
+  windows:
+    # Cross-built with MinGW-w64 in Docker, the same way as the release zip.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: port/tools/package_windows.sh
+      - uses: actions/upload-artifact@v4
+        with: {name: lain-windows-x64, path: dist/Lain-windows.zip}

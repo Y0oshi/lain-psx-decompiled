@@ -1,0 +1,27 @@
+# Copyrighted game data: never commit
+*.bin
+*.cue
+*.chd
+*.iso
+extract/
+disc/
+
+# Generated
+asm/
+/assets/
+build/
+*.ld
+undefined_*.txt
+.venv/
+__pycache__/
+.DS_Store
+.cache/
+
+# Native client build output
+port/build/
+
+# Runtime logs
+*.log
+
+# Packaged builds
+dist/

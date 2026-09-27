@@ -1,0 +1,2297 @@
+#include "PsyX/PsyX_public.h"
+#include <math.h> /* lain: sinf/cosf (not pulled in transitively on MinGW) */
+
+#include "../platform.h"
+#include "../gpu/PsyX_GPU.h"
+
+#include "PsyX/PsyX_render.h"
+#include "PsyX/PsyX_globals.h"
+#include "PsyX/util/timer.h"
+
+#include <assert.h>
+#include <string.h>
+
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#if defined(_LANGUAGE_C_PLUS_PLUS)||defined(__cplusplus)||defined(c_plusplus)
+extern "C" {
+#endif
+
+	__declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
+	__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+
+#if defined(_LANGUAGE_C_PLUS_PLUS)||defined(__cplusplus)||defined(c_plusplus)
+}
+#endif
+
+#endif //def WIN32
+
+#if defined(RENDERER_OGL)
+
+#define USE_PBO					1
+#define USE_OFFSCREEN_BLIT		1
+#define USE_FRAMEBUFFER_BLIT	1
+
+#else
+
+// OpenGL ES/Web GL has slowdowns and doesn't allow GL_LUMINANCE_ALPHA format as framebuffer, so it's disabled
+#define USE_PBO					(OGLES_VERSION == 3)
+#define USE_OFFSCREEN_BLIT		(OGLES_VERSION == 3)
+#define USE_FRAMEBUFFER_BLIT	(OGLES_VERSION == 3)
+
+#endif
+
+extern SDL_Window* g_window;
+
+
+#define MAX_NUM_VERTEX_BUFFERS		(2)
+#define PSX_SCREEN_ASPECT	(240.0f / 320.0f)			// PSX screen is mapped always to this aspect
+
+int g_PreviousBlendMode = BM_NONE;
+int g_PreviousDepthMode = 0;
+int g_PreviousStencilMode = 0;
+int g_PreviousScissorState = 0;
+int g_PreviousOffscreenState = 0;
+RECT16 g_PreviousFramebuffer = { 0,0,0,0 };
+RECT16 g_PreviousOffscreen = { 0,0,0,0 };
+
+ShaderID g_PreviousShader = -1;
+
+TextureID g_vramTexturesDouble[2];
+TextureID g_vramTexture;
+TextureID g_rgLutTexture;
+int g_vramTextureIdx = 0;
+
+TextureID g_fbTexture = -1;
+TextureID g_offscreenRTTexture = -1;
+
+TextureID g_whiteTexture = -1;
+TextureID g_lastBoundTexture = -1;
+
+int g_windowWidth = 0;
+int g_windowHeight = 0;
+
+// lain: the game draws into an offscreen "screen" framebuffer instead of the
+// window; GR_PresentScene scales it to the window. g_windowWidth/Height are the
+// size of that render target: 320x240 times g_cfg_renderScale, or the window's
+// drawable size (full HiDPI resolution) when the scale is 0.
+int g_cfg_renderScale = 0;
+GLuint g_screenFramebuffer = 0;
+static GLuint s_screenColor = 0, s_screenDepth = 0;
+static int s_screenW = 0, s_screenH = 0;
+
+// lain: the part of the window the PS1 display maps to: the largest centered
+// 4:3 rectangle (pillar/letterboxing in fullscreen or odd window shapes).
+void GR_GetViewRect(int* x, int* y, int* w, int* h)
+{
+	int vw = g_windowWidth, vh = g_windowHeight;
+	if (vw * 3 > vh * 4 + 3)
+		vw = vh * 4 / 3;
+	else if (vh * 4 > vw * 3 + 4)
+		vh = vw * 3 / 4;
+	*x = (g_windowWidth - vw) / 2;
+	*y = (g_windowHeight - vh) / 2;
+	*w = vw;
+	*h = vh;
+}
+
+int g_dbg_wireframeMode = 0;
+int g_dbg_texturelessMode = 0;
+
+int g_cfg_pgxpTextureCorrection = 1;
+int g_cfg_pgxpZBuffer = 1;
+int g_cfg_bilinearFiltering = 0;
+
+int vram_need_update = 1;
+int framebuffer_need_update = 0;
+
+#if defined(__EMSCRIPTEN__) || defined(__RPI__) || defined(__ANDROID__)
+#if defined(RENDERER_OGL)
+#error It should not be enabled
+#endif
+#endif
+
+
+
+#if USE_OPENGL
+typedef struct
+{
+	GLenum fmt;
+	GLuint* pbos;
+	uint64_t num_pbos;
+	uint64_t dx;
+	uint64_t num_downloads;
+
+	int width;
+	int height;
+	int nbytes; /* number of bytes in the pbo buffer. */
+	unsigned char* pixels; /* the downloaded pixels. */
+} GrPBO;
+
+int PBO_Init(GrPBO* pbo, GLenum format, int w, int h, int num)
+{
+	if (pbo->pbos)
+	{
+		eprinterr("Already initialized. Not necessary to initialize again; or shutdown first.");
+		return -1;
+	}
+
+	if (0 >= num)
+	{
+		eprinterr("Invalid number of PBOs: %d", num);
+		return -2;
+	}
+
+	pbo->fmt = format;
+	pbo->width = w;
+	pbo->height = h;
+	pbo->num_pbos = num;
+
+#ifndef GL_BGR
+#define GL_BGR 0x80E0
+#endif
+
+#ifndef GL_BGRA
+#define GL_BGRA 0x80E1
+#endif
+
+#if USE_PBO
+	if (GL_RED == pbo->fmt || GL_GREEN == pbo->fmt || GL_BLUE == pbo->fmt) {
+		pbo->nbytes = pbo->width * pbo->height;
+	}
+	else if (GL_RGB == pbo->fmt || GL_BGR == pbo->fmt)
+	{
+		pbo->nbytes = pbo->width * pbo->height * 3;
+	}
+	else if (GL_RGBA == pbo->fmt || GL_BGRA == pbo->fmt) {
+		pbo->nbytes = pbo->width * pbo->height * 4;
+	}
+	else
+	{
+		eprinterr("Unhandled pixel format, use GL_R, GL_RG, GL_RGB or GL_RGBA.");
+		return -3;
+	}
+
+	if (pbo->nbytes == 0)
+	{
+		eprinterr("Invalid width or height given: %d x %d", pbo->width, pbo->height);
+		return -4;
+	}
+
+	pbo->pbos = (GLuint*)malloc(sizeof(GLuint) * num);
+	pbo->pixels = (u_char*)malloc(pbo->nbytes);
+
+	glGenBuffers(num, pbo->pbos);
+	for (int i = 0; i < num; ++i)
+	{
+		glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo->pbos[i]);
+		glBufferData(GL_PIXEL_PACK_BUFFER, pbo->nbytes, NULL, GL_STREAM_READ);
+	}
+
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+#endif
+	return 0;
+}
+
+void PBO_Destroy(GrPBO* pbo)
+{
+#if USE_PBO
+	if(pbo->pbos)
+	{
+		glDeleteBuffers(pbo->num_pbos, pbo->pbos);
+	
+		free(pbo->pbos);
+		pbo->num_pbos = 0;
+		pbo->pbos = NULL;
+	}
+
+#endif
+	if (pbo->pixels)
+	{
+		free(pbo->pixels);
+		pbo->pixels = NULL;
+	}
+
+	pbo->num_downloads = 0;
+	pbo->dx = 0;
+	pbo->fmt = 0;
+	pbo->nbytes = 0;
+}
+
+void PBO_Download(GrPBO* pbo)
+{
+	unsigned char* ptr;
+	
+#if USE_PBO
+	if (pbo->num_downloads < pbo->num_pbos)
+	{
+		/*
+		   First we need to make sure all our pbos are bound, so glMap/Unmap will
+		   read from the oldest bound buffer first.
+		*/
+		glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo->pbos[pbo->dx]);
+
+#if defined(RENDERER_OGL)
+		glGetTexImage(GL_TEXTURE_2D, 0, pbo->fmt, GL_UNSIGNED_BYTE, 0);
+#else
+		glReadPixels(0, 0, pbo->width, pbo->height, pbo->fmt, GL_UNSIGNED_BYTE, 0);   /* When a GL_PIXEL_PACK_BUFFER is bound, the last 0 is used as offset into the buffer to read into. */
+#endif
+	}
+	else
+	{
+		/* Read from the oldest bound pbo */
+		glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo->pbos[pbo->dx]);
+
+#if defined(RENDERER_OGL)
+		ptr = (unsigned char*)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+		if (NULL != ptr)
+		{
+			memcpy(pbo->pixels, ptr, pbo->nbytes);
+			glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+		}
+		else
+			eprintwarn("Failed to map the buffer\n");
+
+		/* Trigger the next read. */
+		glGetTexImage(GL_TEXTURE_2D, 0, pbo->fmt, GL_UNSIGNED_BYTE, 0);
+#else
+		glReadPixels(0, 0, pbo->width, pbo->height, GL_RGBA, GL_UNSIGNED_BYTE, pbo->pixels);
+#endif
+	}
+
+	++pbo->dx;
+	pbo->dx = pbo->dx % pbo->num_pbos;
+
+	pbo->num_downloads++;
+
+	if (pbo->num_downloads == UINT64_MAX)
+		pbo->num_downloads = pbo->num_pbos;
+
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+#else
+	// FIXME: THIS is very slow
+	// Do not use at all
+
+	// glBindBuffer(GL_PIXEL_PACK_BUFFER, 0); /* just make sure we're not accidentilly using a PBO. */
+	// glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pbo->pixels);
+#endif
+}
+
+GLuint		g_glVertexArray[2];
+GLuint		g_glVertexBuffer[2];
+int			g_curVertexBuffer = 0;
+
+GLuint		g_glBlitFramebuffer;
+GrPBO		g_glFramebufferPBO;
+
+GLuint		g_glVRAMFramebuffer;
+
+GLuint		g_glOffscreenFramebuffer;
+GrPBO		g_glOffscreenPBO;
+
+#endif
+
+#if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
+int GR_InitialiseGLContext(char* windowName, int fullscreen)
+{
+	int windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI; // lain: HiDPI
+
+#if defined(__ANDROID__)
+	windowFlags |= SDL_WINDOW_FULLSCREEN;
+#else
+	if (fullscreen)
+		windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP; // lain: no display mode switch
+#endif
+
+	if(g_windowWidth <= 0 || g_windowHeight <= 0)
+		windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+
+	g_window = SDL_CreateWindow(windowName, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, g_windowWidth, g_windowHeight, windowFlags);
+
+	if (g_window == NULL)
+	{
+		eprinterr("Failed to initialise SDL window!\n");
+		return 0;
+	}
+	
+#if defined(RENDERER_OGLES)
+
+#if defined(__ANDROID__)
+	//Override to full screen.
+	SDL_DisplayMode displayMode;
+	if (SDL_GetCurrentDisplayMode(0, &displayMode) == 0)
+	{
+		screenWidth = displayMode.w;
+		windowWidth = displayMode.w;
+		screenHeight = displayMode.h;
+		windowHeight = displayMode.h;
+	}
+#endif
+
+	//SDL_GL_SetAttribute(SDL_GL_CONTEXT_EGL, 1);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, OGLES_VERSION);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+
+	if(!SDL_GL_CreateContext(g_window))
+	{
+		eprinterr("Failed to initialise - OpenGL ES %d.x is not supported.\n", OGLES_VERSION);
+		return 0;
+	}
+
+#elif defined(RENDERER_OGL)
+
+	int major_version = 3;
+	int minor_version = 3;
+	int profile = SDL_GL_CONTEXT_PROFILE_CORE;
+
+	// find best OpenGL version
+	do
+	{
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, major_version);
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, minor_version);
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, profile);
+
+		if (SDL_GL_CreateContext(g_window))
+			break;
+	
+		minor_version--;
+		
+	} while (minor_version >= 0);
+
+	if (minor_version == -1)
+	{
+		eprinterr("Failed to initialise - OpenGL 3.x is not supported. Please update video drivers.\n");
+		return 0;
+	}
+#endif
+
+	return 1;
+}
+#endif
+
+int GR_InitialiseGLExt()
+{
+#ifdef USE_GLAD
+	GLenum err = gladLoadGL();
+
+	if (err == 0)
+		return 0;
+#endif
+	
+	const char* rend = (const char*)glGetString(GL_RENDERER);
+	const char* vendor = (const char*)glGetString(GL_VENDOR);
+	eprintf("*Video adapter: %s by %s\n", rend, vendor);
+
+	const char* versionStr = (const char*)glGetString(GL_VERSION);
+	eprintf("*OpenGL version: %s\n", versionStr);
+
+	const char* glslVersionStr = (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION);
+	eprintf("*GLSL version: %s\n", glslVersionStr);
+
+	return 1;
+}
+
+int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
+{
+	g_windowWidth = width;
+	g_windowHeight = height;
+
+	// Due to debugging in fullscreen
+	SDL_SetHint(SDL_HINT_ALLOW_TOPMOST, "0");
+	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+#ifdef SDL_HINT_WINDOWS_DPI_AWARENESS
+	SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitor");
+#endif
+
+#if USE_OPENGL
+	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 1);
+
+#if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
+	if (!GR_InitialiseGLContext(windowName, fullscreen))
+	{
+		eprinterr("Failed to Initialise GL Context!\n");
+		return 0;
+	}
+#endif
+
+	if (!GR_InitialiseGLExt())
+	{
+		eprinterr("Failed to Intialise GL extensions\n");
+		return 0;
+	}
+#endif
+	
+	return 1;
+}
+
+void GR_Shutdown()
+{
+#if USE_OPENGL
+	glDeleteVertexArrays(2, g_glVertexArray);
+	glDeleteBuffers(2, g_glVertexBuffer);
+
+	PBO_Destroy(&g_glFramebufferPBO);
+	PBO_Destroy(&g_glOffscreenPBO);
+
+	glDeleteFramebuffers(1, &g_glBlitFramebuffer);
+	glDeleteFramebuffers(1, &g_glOffscreenFramebuffer);
+	glDeleteFramebuffers(1, &g_glVRAMFramebuffer);
+	glDeleteFramebuffers(1, &g_screenFramebuffer); // lain
+	glDeleteTextures(1, &s_screenColor);
+	glDeleteRenderbuffers(1, &s_screenDepth);
+
+	GR_DestroyTexture(g_vramTexturesDouble[0]);
+	GR_DestroyTexture(g_vramTexturesDouble[1]);
+
+	GR_DestroyTexture(g_whiteTexture);
+	GR_DestroyTexture(g_rgLutTexture);
+	GR_DestroyTexture(g_fbTexture);
+	GR_DestroyTexture(g_offscreenRTTexture);
+#endif
+}
+
+void GR_UpdateSwapIntervalState(int swapInterval)
+{
+#if defined(RENDERER_OGL)
+	SDL_GL_SetSwapInterval(swapInterval);
+#endif
+}
+
+// lain: (re)creates the screen framebuffer when the target size changes.
+static void GR_UpdateScreenTarget()
+{
+	int dw = 0, dh = 0;
+	SDL_GL_GetDrawableSize(g_window, &dw, &dh);
+	int w = g_cfg_renderScale > 0 ? 320 * g_cfg_renderScale : dw;
+	int h = g_cfg_renderScale > 0 ? 240 * g_cfg_renderScale : dh;
+	if (w <= 0 || h <= 0)
+		w = 320, h = 240;
+	g_windowWidth = w;
+	g_windowHeight = h;
+	if (g_screenFramebuffer && w == s_screenW && h == s_screenH)
+		return;
+
+	if (!g_screenFramebuffer)
+	{
+		glGenFramebuffers(1, &g_screenFramebuffer);
+		glGenTextures(1, &s_screenColor);
+		glGenRenderbuffers(1, &s_screenDepth);
+	}
+	s_screenW = w;
+	s_screenH = h;
+	glBindTexture(GL_TEXTURE_2D, s_screenColor);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glBindRenderbuffer(GL_RENDERBUFFER, s_screenDepth);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+	glBindRenderbuffer(GL_RENDERBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, g_screenFramebuffer);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_screenColor, 0);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, s_screenDepth);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		eprinterr("screen framebuffer incomplete (%dx%d)\n", w, h);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+}
+
+// lain: draws the finished frame into the window (letterboxed, 4:3 kept) and
+// leaves the window bound, so overlays drawn next land on top at full resolution.
+static void GR_PresentFrom(GLuint source);
+
+void GR_PresentScene()
+{
+	GR_PresentFrom(g_screenFramebuffer);
+}
+
+// ---- lain: frame interpolation (see LainInterp_* in PsyX_GPU.cpp) ----------
+// In-between frames are drawn into their own framebuffer so the real frame in
+// the screen framebuffer (which the game reads back into VRAM) is untouched.
+static GLuint s_interpFbo = 0, s_interpColor = 0, s_interpDepth = 0;
+static GLuint s_baseTex = 0, s_baseFbo = 0;       // the scene's first image (background + clear)
+static int s_interpW = 0, s_interpH = 0;
+static GLuint s_copyFbo[2] = { 0, 0 };
+#define INTERP_MAX_SNAPS 8
+static GLuint s_vramSnaps[INTERP_MAX_SNAPS];
+
+static void GR_InterpEnsureTargets()
+{
+	if (s_interpFbo && s_interpW == s_screenW && s_interpH == s_screenH)
+		return;
+	if (!s_interpFbo)
+	{
+		glGenFramebuffers(1, &s_interpFbo);
+		glGenTextures(1, &s_interpColor);
+		glGenRenderbuffers(1, &s_interpDepth);
+		glGenFramebuffers(1, &s_baseFbo);
+		glGenTextures(1, &s_baseTex);
+		glGenFramebuffers(2, s_copyFbo);
+	}
+	s_interpW = s_screenW;
+	s_interpH = s_screenH;
+	GLuint texs[2] = { s_interpColor, s_baseTex };
+	for (int i = 0; i < 2; i++)
+	{
+		glBindTexture(GL_TEXTURE_2D, texs[i]);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, s_interpW, s_interpH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	}
+	glBindTexture(GL_TEXTURE_2D, 0);
+	g_lastBoundTexture = -1;
+	glBindRenderbuffer(GL_RENDERBUFFER, s_interpDepth);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, s_interpW, s_interpH);
+	glBindRenderbuffer(GL_RENDERBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, s_interpFbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_interpColor, 0);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, s_interpDepth);
+	glBindFramebuffer(GL_FRAMEBUFFER, s_baseFbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_baseTex, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, g_screenFramebuffer);
+}
+
+// Copies texture src into dst (same size and format) with a framebuffer blit.
+static void GR_CopyTexture(GLuint src, GLuint dst, int w, int h)
+{
+	GLint prevDraw = 0, prevRead = 0;
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, s_copyFbo[0]);
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, src, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_copyFbo[1]);
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst, 0);
+	const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+	glDisable(GL_SCISSOR_TEST);
+	glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	if (scissor)
+		glEnable(GL_SCISSOR_TEST);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, prevRead);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDraw);
+}
+
+// The scene's starting image (after the VRAM background and the background clear).
+void GR_InterpSnapshotBase()
+{
+	GR_InterpEnsureTargets();
+	GLint prevDraw = 0, prevRead = 0;
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+	const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+	glDisable(GL_SCISSOR_TEST);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, g_screenFramebuffer);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_baseFbo);
+	glBlitFramebuffer(0, 0, s_interpW, s_interpH, 0, 0, s_interpW, s_interpH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	if (scissor)
+		glEnable(GL_SCISSOR_TEST);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, prevRead);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDraw);
+}
+
+// VRAM as a batch of the scene saw it (later uploads must not show up early).
+int GR_InterpSnapshotVRAM(int slot)
+{
+	if (slot < 0 || slot >= INTERP_MAX_SNAPS)
+		return 0;
+	GR_InterpEnsureTargets();
+	if (!s_vramSnaps[slot])
+	{
+		glGenTextures(1, &s_vramSnaps[slot]);
+		glBindTexture(GL_TEXTURE_2D, s_vramSnaps[slot]);
+		glTexImage2D(GL_TEXTURE_2D, 0, VRAM_INTERNAL_FORMAT, VRAM_WIDTH, VRAM_HEIGHT, 0, VRAM_FORMAT, GL_UNSIGNED_BYTE, NULL);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		g_lastBoundTexture = -1;
+	}
+	GR_CopyTexture(g_vramTexture, s_vramSnaps[slot], VRAM_WIDTH, VRAM_HEIGHT);
+	return 1;
+}
+
+// Texture to use for a recorded split: VRAM textures map to the batch's snapshot.
+TextureID GR_InterpTexture(TextureID recorded, int slot)
+{
+	if ((recorded == g_vramTexturesDouble[0] || recorded == g_vramTexturesDouble[1]) &&
+		slot >= 0 && slot < INTERP_MAX_SNAPS && s_vramSnaps[slot])
+		return s_vramSnaps[slot];
+	return recorded;
+}
+
+// Starts an in-between frame: the interpolation framebuffer stands in for the
+// screen until GR_InterpEnd, starting from the scene's base image.
+static GLuint s_savedScreenFbo;
+void GR_InterpBegin()
+{
+	GR_InterpEnsureTargets();
+	s_savedScreenFbo = g_screenFramebuffer;
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, s_baseFbo);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_interpFbo);
+	glDisable(GL_SCISSOR_TEST);
+	g_PreviousScissorState = 0;
+	glBlitFramebuffer(0, 0, s_interpW, s_interpH, 0, 0, s_interpW, s_interpH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	g_screenFramebuffer = s_interpFbo;
+	glBindFramebuffer(GL_FRAMEBUFFER, s_interpFbo);
+	glClearDepth(1.0f);
+	glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+	int vx, vy, vw, vh;
+	GR_GetViewRect(&vx, &vy, &vw, &vh);
+	GR_SetViewPort(vx, vy, vw, vh);
+	g_lastBoundTexture = -1;
+}
+
+// Shows the in-between frame and gives the screen framebuffer back.
+void GR_InterpEnd()
+{
+	GR_PresentFrom(s_interpFbo);
+	g_screenFramebuffer = s_savedScreenFbo;
+}
+
+void GR_InterpRestore()
+{
+	glBindFramebuffer(GL_FRAMEBUFFER, g_screenFramebuffer);
+	glDisable(GL_SCISSOR_TEST);
+	g_PreviousScissorState = 0;
+	int vx, vy, vw, vh;
+	GR_GetViewRect(&vx, &vy, &vw, &vh);
+	GR_SetViewPort(vx, vy, vw, vh);
+	g_lastBoundTexture = -1;
+}
+
+static void GR_PresentFrom(GLuint source)
+{
+	int dw = 0, dh = 0;
+	SDL_GL_GetDrawableSize(g_window, &dw, &dh);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glDisable(GL_SCISSOR_TEST);
+	g_PreviousScissorState = 0;
+	glViewport(0, 0, dw, dh);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT);
+	if (!source || dw <= 0 || dh <= 0)
+		return;
+
+	// The 4:3 picture inside the render target, fitted into the window.
+	int vx, vy, vw, vh;
+	GR_GetViewRect(&vx, &vy, &vw, &vh);
+	int ow = dw, oh = dh;
+	if ((long)ow * vh > (long)oh * vw)
+		ow = (int)((long)oh * vw / vh);
+	else
+		oh = (int)((long)ow * vh / vw);
+	// Whole-pixel magnification stays crisp; anything else is filtered.
+	const int integer = ow % vw == 0 && oh % vh == 0;
+	const int ox = (dw - ow) / 2, oy = (dh - oh) / 2;
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, source);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBlitFramebuffer(vx, vy, vx + vw, vy + vh, ox, oy, ox + ow, oy + oh, GL_COLOR_BUFFER_BIT,
+		integer || ow > vw * 2 ? GL_NEAREST : GL_LINEAR);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void GR_BeginScene()
+{
+	g_lastBoundTexture = 0;
+
+	// lain: draw into the screen framebuffer at the render scale
+	GR_UpdateScreenTarget();
+	glBindFramebuffer(GL_FRAMEBUFFER, g_screenFramebuffer);
+
+#if USE_OPENGL
+#ifdef RENDERER_OGLES
+	//glClearDepthf(1.0f);
+#else
+	glClearDepth(1.0f);
+#endif
+	glClear(GL_DEPTH_BUFFER_BIT);
+	glClear(GL_STENCIL_BUFFER_BIT);
+#endif
+
+	GR_UpdateVRAM();
+	{
+		// lain: black borders around the 4:3 view, then draw inside it
+		int vx, vy, vw, vh;
+		GR_GetViewRect(&vx, &vy, &vw, &vh);
+		glDisable(GL_SCISSOR_TEST);
+		g_PreviousScissorState = 0;
+		if (vw != g_windowWidth || vh != g_windowHeight)
+		{
+			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT);
+		}
+		GR_SetViewPort(vx, vy, vw, vh);
+	}
+
+	if (g_dbg_wireframeMode)
+	{
+		GR_SetWireframe(1);
+
+#if USE_OPENGL
+		glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+#endif
+	}
+}
+
+void GR_EndScene()
+{
+	framebuffer_need_update = 1;
+	
+	if (g_dbg_wireframeMode)
+		GR_SetWireframe(0);
+
+#if USE_OPENGL
+	glBindVertexArray(0);
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+
+unsigned short vram[VRAM_WIDTH * VRAM_HEIGHT];
+static u_char rgLUT[LUT_WIDTH * LUT_HEIGHT * sizeof(u_int)];
+
+void GR_ResetDevice()
+{
+	GR_UpdateSwapIntervalState(0);
+}
+
+typedef struct
+{
+	// shader itself
+	ShaderID shader;
+
+#if USE_OPENGL
+	GLint projectionLoc;
+	GLint projection3DLoc;
+	GLint bilinearFilterLoc;
+	GLint texelSizeLoc;
+	GLint texLoc;
+	GLint lutLoc;
+#endif
+} PSXGPU_Shader;
+
+PSXGPU_Shader g_gpu_shader_4;
+PSXGPU_Shader g_gpu_shader_8;
+PSXGPU_Shader g_gpu_shader_16;
+PSXGPU_Shader g_gpu_shader_32_rgba;
+
+#if USE_OPENGL
+
+GLint u_projectionLoc;
+GLint u_projection3DLoc;
+GLint u_texelSizeLoc;
+
+#define GPU_SAMPLE_TEXTURE_4BIT_FUNC\
+    "   // returns 16 bit colour\n"\
+    "   vec2 samplePSX(vec2 tc) {\n"\
+    "       vec2 uv = (tc * vec2(0.25, 1.0) + v_page_clut.xy) * c_VRAMTexel;\n"\
+    "       vec2 comp = VRAM(uv);\n"\
+    "       int index = int(fract(tc.x / 4.0 + 0.0001) * 4.0);\n"\
+    "       float v = _idx2(comp, index / 2) * (255.0 / 16.0);\n"\
+    "       float f = floor(v + 0.001);\n"\
+    "       vec2 c = vec2( (v - f) * 16.0, f );\n"\
+    "       vec2 clut_pos = v_page_clut.zw;\n"\
+    "       clut_pos.x += mix(c[0], c[1], mod(float(index), 2.0)) * c_VRAMTexel.x;\n"\
+    "       return VRAM(clut_pos);\n"\
+    "   }\n"
+
+#define GPU_SAMPLE_TEXTURE_8BIT_FUNC\
+	"	// returns 16 bit colour\n"\
+	"	vec2 samplePSX(vec2 tc) {\n"\
+	"		vec2 uv = (tc * vec2(0.5, 1.0) + v_page_clut.xy) * c_VRAMTexel;\n"\
+	"		vec2 comp = VRAM(uv);\n"\
+	"		vec2 clut_pos = v_page_clut.zw;\n"\
+	"		int index = int(mod(tc.x, 2.0));\n"\
+	"		clut_pos.x += _idx2(comp, index) * 255.0 * c_VRAMTexel.x;\n"\
+	"		vec2 color_rg = VRAM(clut_pos);\n"\
+	"		return VRAM(clut_pos);\n"\
+	"	}\n"
+
+#define GPU_SAMPLE_TEXTURE_16BIT_FUNC\
+	"	vec2 samplePSX(vec2 tc) {\n"\
+	"		vec2 uv = (tc + v_page_clut.xy) * c_VRAMTexel;\n"\
+	"		vec2 color_rg = VRAM(uv);\n"\
+	"		return color_rg;\n"\
+	"	}\n"
+
+#if (VRAM_FORMAT == GL_LUMINANCE_ALPHA)
+
+#define GPU_FETCH_VRAM_FUNC \
+		"	const vec2 c_VRAMTexel = vec2(1.0 / 1024.0, 1.0 / 512.0);\n"\
+		"	uniform sampler2D s_texture;\n"\
+		"	vec2 VRAM(vec2 uv) { return texture2D(s_texture, uv).ra; }\n"
+#else
+
+#define GPU_FETCH_VRAM_FUNC \
+		"	const vec2 c_VRAMTexel = vec2(1.0 / 1024.0, 1.0 / 512.0);\n"\
+		"	uniform sampler2D s_texture;\n"\
+		"	vec2 VRAM(vec2 uv) { return texture2D(s_texture, uv).rg; }\n"
+#endif
+
+#if defined(RENDERER_OGL) || (OGLES_VERSION == 3)
+
+#	define GPU_DITHERING \
+		"	const mat4 c_dither = mat4(\n"\
+		"		-4.0,  +0.0,  -3.0,  +1.0,\n"\
+		"		+2.0,  -2.0,  +3.0,  -1.0,\n"\
+		"		-3.0,  +1.0,  -4.0,  +0.0,\n"\
+		"		+3.0,  -1.0,  +2.0,  -2.0) / 255.0;\n"\
+		"	vec4 dither(vec4 color) {\n"\
+		"		ivec2 dc = ivec2(fract(gl_FragCoord.xy / 4.0) * 4.0);\n"\
+		"		color.xyz += vec3(c_dither[dc.x][dc.y] * v_texcoord.w);\n"\
+		"		return color;\n"\
+		"	}\n"
+
+#	define GPU_ARRAY_FUNC\
+		"	float _idx2(vec2 array, int idx) { return array[idx]; }\n"
+
+#else
+
+#	define GPU_DITHERING \
+		"	vec4 dither(vec4 color) { return color; }\n"
+
+#	define GPU_ARRAY_FUNC \
+		"	float _idx2(vec2 array, int idx) { return idx == 0 ? array.x : array.y; }\n"
+
+#endif
+
+#define GPU_FRAGMENT_SAMPLE_SHADER(bit) \
+	GPU_FETCH_VRAM_FUNC\
+	GPU_ARRAY_FUNC\
+	GPU_SAMPLE_TEXTURE_## bit ##BIT_FUNC\
+	"	uniform sampler2D s_rgLut;\n"\
+	"	const vec2 c_LUTTexel = vec2(1.0 / 256.0, 1.0 / 256.0);\n"\
+	"	vec4 lut(vec2 rg) { return texture2D(s_rgLut, rg - c_LUTTexel * 0.0001); }\n"\
+	"	vec4 bilinearTextureSample(vec2 P) {\n"\
+	"		vec2 frac = fract(P);\n"\
+	"		vec2 pixel = floor(P);\n"\
+	"		vec2 C11 = samplePSX(pixel);\n"\
+	"		vec2 C21 = samplePSX(pixel + vec2(1.0, 0.0));\n"\
+	"		vec2 C12 = samplePSX(pixel + vec2(0.0, 1.0));\n"\
+	"		vec2 C22 = samplePSX(pixel + vec2(1.0, 1.0));\n"\
+	"		float ax1 = mix(float(C11.r + C11.g > 0.0), float(C21.r + C21.g > 0.0), frac.x);\n"\
+	"		float ax2 = mix(float(C12.r + C12.g > 0.0), float(C22.r + C22.g > 0.0), frac.x);\n"\
+	"		float axm = mix(ax1, ax2, frac.y);\n"\
+	"		if(axm < 0.5) { discard; }\n"\
+	"		vec4 x1 = mix(lut(C11), lut(C21), frac.x);\n"\
+	"		vec4 x2 = mix(lut(C12), lut(C22), frac.x);\n"\
+	"		vec4 t = mix(x1, x2, frac.y);\n"\
+	"		t.w = 1.0 - t.w;\n"\
+	"		return t;\n"\
+	"	}\n"\
+	"	vec4 nearestTextureSample(vec2 P) {\n"\
+	"		vec2 rg = samplePSX(P);\n"\
+	"		float rgm = rg.x + rg.y;\n"\
+	"		if (rgm == 0.0) { discard; }\n"\
+	"		vec4 t = lut(rg);\n"\
+	"		t.w = 1.0 - t.w;\n"\
+	"		return t;\n"\
+	"	}\n"\
+	"	uniform int bilinearFilter;\n"\
+	"	void main() {\n"\
+	"		vec4 color = (bilinearFilter > 0) ? bilinearTextureSample(v_texcoord.xy) : nearestTextureSample(v_texcoord.xy);\n"\
+	"		fragColor = dither(color * v_color);\n"\
+	"	}\n"
+	
+static const char* gpu_shader_common = R"(
+	varying vec4 v_texcoord;
+	varying vec4 v_color;
+	varying vec4 v_page_clut;
+	varying float v_z;
+)";
+
+const char* gpu_shader_4 = GPU_FRAGMENT_SAMPLE_SHADER(4);
+const char* gpu_shader_8 = GPU_FRAGMENT_SAMPLE_SHADER(8);
+const char* gpu_shader_16 = GPU_FRAGMENT_SAMPLE_SHADER(16);
+const char* gpu_shader_32_rgba = 
+	"	uniform sampler2D s_texture;\n"\
+	"	uniform vec2 texelSize;\n"\
+	"	void main() {\n"\
+	"		vec2 tc = v_texcoord.xy * texelSize + texelSize * 0.5;\n"\
+	"		vec4 color = texture2D(s_texture, tc);\n"\
+	"		fragColor = dither(color * v_color);\n"\
+	"	}\n";
+
+#if USE_PGXP
+#	define GTE_PERSPECTIVE_CORRECTION \
+		"	mat4 ofsMat = mat4(\n"\
+		"		vec4(1.0,  0.0,  0.0,  0.0),\n"\
+		"		vec4(0.0,  1.0,  0.0,  0.0),\n"\
+		"		vec4(0.0,  0.0,  1.0,  0.0),\n"\
+		"		vec4(a_zw.z, -a_zw.w,  0.0,  1.0));\n"\
+		"	vec2 geom_ofs = vec2(0.5, 0.5);\n"\
+		"	vec4 fragPosition = (a_zw.y > 100.0 ? ofsMat * (Projection3D * vec4((a_position.xy + geom_ofs) * vec2(1.0,-1.0) * a_zw.y, a_zw.x, 1.0)) : (Projection * vec4(a_position.xy, 0.5, 1.0)));\n" \
+		"	gl_Position = fragPosition;\n"
+#else
+#	define GTE_PERSPECTIVE_CORRECTION \
+		"	gl_Position = Projection * vec4(a_position.xy, 0.0, 1.0);\n"
+#endif
+
+#define GTE_VERTEX_SHADER \
+	"	attribute vec4 a_position;\n"\
+	"	attribute vec4 a_texcoord; // uv, color multiplier, dither\n"\
+	"	attribute vec4 a_color;\n"\
+	"	attribute vec4 a_extra; // texcoord.xy ofs, unused.xy\n"\
+	"	attribute vec4 a_zw;\n"\
+	"	uniform mat4 Projection;\n"\
+	"	uniform mat4 Projection3D;\n"\
+	"	const vec2 c_UVFudge = vec2(0.00025, 0.00025);\n"\
+	"	void main() {\n"\
+	"		v_texcoord = a_texcoord;\n"\
+	"		v_texcoord.xy += a_extra.xy * 0.5;\n"\
+	"		v_color = a_color;\n"\
+	"		v_color.xyz *= a_texcoord.z;\n"\
+	"		v_page_clut.x = fract(a_position.z / 16.0) * 1024.0;\n"\
+	"		v_page_clut.y = floor(a_position.z / 16.0) * 256.0;\n"\
+	"		v_page_clut.z = fract(a_position.w / 64.0);\n"\
+	"		v_page_clut.w = floor(a_position.w / 64.0) / 512.0;\n"\
+	"		v_page_clut.xy += c_UVFudge;\n"\
+	"		v_page_clut.zw += c_UVFudge;\n"\
+	GTE_PERSPECTIVE_CORRECTION\
+	"		v_z = (gl_Position.z - 40.0) * 0.005;\n"\
+	"	}\n"
+
+int GR_Shader_CheckShaderStatus(GLuint shader)
+{
+	char info[1024];
+	GLint result;
+
+	glGetShaderiv(shader, GL_COMPILE_STATUS, &result);
+
+	if (result == GL_TRUE)
+		return 1;
+	
+	glGetShaderInfoLog(shader, sizeof(info), NULL, info);
+	if (info[0] && strlen(info) > 8)
+	{
+		eprinterr("%s\n", info);
+		assert(0);
+	}
+
+	return 0;
+}
+
+int GR_Shader_CheckProgramStatus(GLuint program)
+{
+	char info[1024];
+	GLint result;
+
+	glGetProgramiv(program, GL_LINK_STATUS, &result);
+
+	if (result == GL_TRUE)
+		return 1;
+
+	glGetProgramInfoLog(program, sizeof(info), NULL, info);
+	if (info[0] && strlen(info) > 8)
+	{
+		eprinterr("%s\n", info);
+		assert(0);
+	}
+
+	return 0;
+}
+
+ShaderID GR_Shader_Compile(const char* source, int isPsxShader)
+{
+#if defined(ES2_SHADERS)
+	const char* GLSL_HEADER_VERT = R"(
+		#version 100
+		precision lowp  int;
+		precision highp float;
+	)";
+
+	const char* GLSL_HEADER_FRAG = R"(
+		#version 100
+		precision lowp  int;
+		precision highp float;
+		#define fragColor gl_FragColor
+	)";
+#elif defined(ES3_SHADERS)
+	const char* GLSL_HEADER_VERT = R"(
+		#version 300 es
+		precision lowp  int;
+		precision highp float;
+		#define varying   out
+		#define attribute in
+		#define texture2D texture
+	)";
+
+	const char* GLSL_HEADER_FRAG = R"(
+		#version 300 es
+		precision lowp  int;
+		precision highp float;
+		#define varying     in
+		#define texture2D   texture
+		out vec4 fragColor;
+	)";
+#else
+	const char* GLSL_HEADER_VERT = R"(
+		#version 140
+		precision lowp  int;
+		precision highp float;
+		#define varying   out
+		#define attribute in
+		#define texture2D texture
+	)";
+
+	const char* GLSL_HEADER_FRAG = R"(
+		#version 140
+		precision lowp  int;
+		precision highp float;
+		#define varying     in
+		#define texture2D   texture
+		out vec4 fragColor;
+	)";
+#endif
+
+	char extra_vs_defines[1024];
+	char extra_fs_defines[1024];
+	extra_vs_defines[0] = 0;
+	extra_fs_defines[0] = 0;
+
+	strcat(extra_vs_defines, "#define VERTEX\n");
+	strcat(extra_fs_defines, "#define FRAGMENT\n");
+	if (g_cfg_bilinearFiltering)
+	{
+		strcat(extra_fs_defines, "#define BILINEAR_FILTER\n");
+	}
+
+	const char* vs_list_psx[] = { 
+		GLSL_HEADER_VERT,
+		extra_vs_defines,
+		gpu_shader_common,
+		GTE_VERTEX_SHADER
+	};
+	const char* fs_list_psx[] = {
+		GLSL_HEADER_FRAG,
+		extra_fs_defines,
+		gpu_shader_common,
+		GPU_DITHERING,
+		source
+	};
+
+	const char* vs_list_src[] = { 
+		GLSL_HEADER_VERT,
+		extra_vs_defines,
+		source,
+	};
+	const char* fs_list_src[] = {
+		GLSL_HEADER_FRAG,
+		extra_fs_defines,
+		source
+	};
+
+	const char** vs_list = isPsxShader ? vs_list_psx : vs_list_src;
+	const char** fs_list = isPsxShader ? fs_list_psx : fs_list_src;
+	const int vs_list_cnt = isPsxShader ? 4 : 3;
+	const int fs_list_cnt = isPsxShader ? 5 : 3;
+
+	GLuint program = glCreateProgram();
+
+	{
+		GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
+		glShaderSource(vertexShader, vs_list_cnt, vs_list, NULL);
+		glCompileShader(vertexShader);
+
+		if( GR_Shader_CheckShaderStatus(vertexShader) == 0 )
+			eprinterr("Failed to compile Vertex Shader!\n");
+	
+		glAttachShader(program, vertexShader);
+		glDeleteShader(vertexShader);
+	}
+
+	{
+		GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+		glShaderSource(fragmentShader, fs_list_cnt, fs_list, NULL);
+		glCompileShader(fragmentShader);
+
+		if(GR_Shader_CheckShaderStatus(fragmentShader) == 0)
+			eprinterr("Failed to compile Fragment Shader!\n");
+	
+		glAttachShader(program, fragmentShader);
+		glDeleteShader(fragmentShader);
+	}
+
+	glBindAttribLocation(program, a_position, "a_position");
+	glBindAttribLocation(program, a_texcoord, "a_texcoord");
+	glBindAttribLocation(program, a_color, "a_color");
+
+#if USE_PGXP
+	glBindAttribLocation(program, a_zw, "a_zw");
+#endif
+
+	glLinkProgram(program);
+	if(GR_Shader_CheckProgramStatus(program) == 0)
+		eprinterr("Failed to link Shader!\n");
+
+	GLint sampler = 0;
+	glUseProgram(program);
+	glUniform1iv(glGetUniformLocation(program, "s_rgLut"), 1, &sampler);
+	glUniform1iv(glGetUniformLocation(program, "s_texture"), 1, &sampler);
+	glUseProgram(0);
+
+	return program;
+}
+#else
+#error
+#endif
+
+//--------------------------------------------------------------------------------------------
+
+void GR_GenerateCommonTextures()
+{
+	unsigned int whitePixelData = 0xFFFFFFFF;
+
+#if USE_OPENGL
+	glGenTextures(1, &g_whiteTexture);
+	{
+		glBindTexture(GL_TEXTURE_2D, g_whiteTexture);
+
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &whitePixelData);
+
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+
+	glGenTextures(1, &g_rgLutTexture);
+	{
+		glBindTexture(GL_TEXTURE_2D, g_rgLutTexture);
+
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, LUT_WIDTH, LUT_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, &rgLUT);
+
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+#endif
+}
+
+TextureID GR_CreateRGBATexture(int width, int height, u_char* data /*= nullptr*/)
+{
+	TextureID newTexture;
+	glGenTextures(1, &newTexture);
+
+	glBindTexture(GL_TEXTURE_2D, newTexture);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, g_cfg_bilinearFiltering ? GL_LINEAR : GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, g_cfg_bilinearFiltering ? GL_LINEAR : GL_NEAREST);
+	
+	// another WebGL stuff. Texture will be black without clamp to edge
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+	glBindTexture(GL_TEXTURE_2D, 0);
+
+	return newTexture;
+}
+
+void GR_CompilePSXShader(PSXGPU_Shader* sh, const char* source)
+{
+	sh->shader = GR_Shader_Compile(source, true);
+
+#if USE_OPENGL
+	sh->bilinearFilterLoc = glGetUniformLocation(sh->shader, "bilinearFilter");
+	sh->projectionLoc = glGetUniformLocation(sh->shader, "Projection");
+	sh->texelSizeLoc = glGetUniformLocation(sh->shader, "texelSize");
+	sh->texLoc = glGetUniformLocation(sh->shader, "s_texture");
+	sh->lutLoc = glGetUniformLocation(sh->shader, "s_rgLut");
+#if USE_PGXP
+	sh->projection3DLoc = glGetUniformLocation(sh->shader, "Projection3D");
+#endif
+#endif
+}
+
+void GR_InitialisePSXShaders()
+{
+	GR_CompilePSXShader(&g_gpu_shader_4, gpu_shader_4);
+	GR_CompilePSXShader(&g_gpu_shader_8, gpu_shader_8);
+	GR_CompilePSXShader(&g_gpu_shader_16, gpu_shader_16);
+	GR_CompilePSXShader(&g_gpu_shader_32_rgba, gpu_shader_32_rgba);
+}
+
+void GR_InitRG8LUT()
+{
+	for (u_short y = 0; y < LUT_HEIGHT; y++)
+	{
+		u_char* row = rgLUT + y * (LUT_HEIGHT * 4);
+		for (u_short x = 0; x < LUT_WIDTH; x++)
+		{
+			const u_short c = (y << 8) | x;
+			u_char* pixel = row + x * 4;
+			pixel[0] = (u_char)((c & 31)) << 3;
+			pixel[1] = (u_char)((c >> 5) & 31) << 3;
+			pixel[2] = (u_char)((c >> 10) & 31) << 3;
+			pixel[3] = (u_char)((c >> 15) & 1) << 7;
+		}
+	}
+}
+
+int GR_InitialisePSX()
+{
+	SDL_memset(vram, 0, VRAM_WIDTH * VRAM_HEIGHT * sizeof(unsigned short));
+	GR_InitRG8LUT();
+	GR_GenerateCommonTextures();
+	GR_InitialisePSXShaders();
+
+#if USE_OPENGL
+	glDepthFunc(GL_LEQUAL);
+	glEnable(GL_STENCIL_TEST);
+	glBlendColor(0.5f, 0.5f, 0.5f, 0.25f);
+
+	// gen framebuffer
+	{
+		memset(&g_glFramebufferPBO, 0, sizeof(g_glFramebufferPBO));
+		PBO_Init(&g_glFramebufferPBO, GL_RGBA, VRAM_WIDTH, VRAM_HEIGHT, 2);
+		
+		// make a special texture
+		// it will be resized later
+		glGenTextures(1, &g_fbTexture);
+		{
+			glBindTexture(GL_TEXTURE_2D, g_fbTexture);
+
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+			// default to VRAM size
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, VRAM_WIDTH, VRAM_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+
+			glBindTexture(GL_TEXTURE_2D, 0);
+		}
+
+		glGenFramebuffers(1, &g_glBlitFramebuffer);
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, g_glBlitFramebuffer);
+
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_fbTexture, 0);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+
+			glBindFramebuffer(GL_FRAMEBUFFER, g_screenFramebuffer);
+		}
+	}
+
+	// gen offscreen RT
+	{
+		memset(&g_glOffscreenPBO, 0, sizeof(g_glOffscreenPBO));
+		PBO_Init(&g_glOffscreenPBO, GL_RGBA, VRAM_WIDTH, VRAM_HEIGHT, 2);
+		
+		// offscreen texture render target
+		glGenTextures(1, &g_offscreenRTTexture);
+		{
+			glBindTexture(GL_TEXTURE_2D, g_offscreenRTTexture);
+
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+			// default to VRAM size
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, VRAM_WIDTH, VRAM_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+
+			glBindTexture(GL_TEXTURE_2D, 0);
+		}
+
+		glGenFramebuffers(1, &g_glOffscreenFramebuffer);
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, g_glOffscreenFramebuffer);
+
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_offscreenRTTexture, 0);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+
+			glBindFramebuffer(GL_FRAMEBUFFER, g_screenFramebuffer);
+		}
+	}
+
+	// gen VRAM textures.
+	// double-buffered
+	{
+		int i;
+
+		glGenTextures(2, g_vramTexturesDouble);
+
+		for(i = 0; i < 2; i++)
+		{
+			glBindTexture(GL_TEXTURE_2D, g_vramTexturesDouble[i]);
+
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+			// set storage size
+			glTexImage2D(GL_TEXTURE_2D, 0, VRAM_INTERNAL_FORMAT, VRAM_WIDTH, VRAM_HEIGHT, 0, VRAM_FORMAT, GL_UNSIGNED_BYTE, NULL);
+		}
+
+		g_vramTexture = g_vramTexturesDouble[0];
+
+		glBindTexture(GL_TEXTURE_2D, 0);
+
+		// VRAM framebuffer for offscreen blitting to VRAM
+		glGenFramebuffers(1, &g_glVRAMFramebuffer);
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, g_glVRAMFramebuffer);
+
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+
+			glBindFramebuffer(GL_FRAMEBUFFER, g_screenFramebuffer);
+		}
+	}
+
+	// gen vertex buffer and index buffer
+	{
+		int i;
+
+		glGenBuffers(MAX_NUM_VERTEX_BUFFERS, g_glVertexBuffer);
+		glGenVertexArrays(MAX_NUM_VERTEX_BUFFERS, g_glVertexArray);
+
+		for (i = 0; i < MAX_NUM_VERTEX_BUFFERS; i++)
+		{
+			glBindVertexArray(g_glVertexArray[i]);
+
+			glBindBuffer(GL_ARRAY_BUFFER, g_glVertexBuffer[i]);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(GrVertex) * MAX_VERTEX_BUFFER_SIZE, NULL, GL_DYNAMIC_DRAW);
+		}
+
+		glBindVertexArray(0);
+	}
+#else
+#error
+#endif
+
+	GR_ResetDevice();
+
+	return 1;
+}
+
+void GR_Ortho2D(float left, float right, float bottom, float top, float znear, float zfar)
+{
+	float a = 2.0f / (right - left);
+	float b = 2.0f / (top - bottom);
+	float c = 2.0f / (znear - zfar);
+
+	float x = (left + right) / (left - right);
+	float y = (bottom + top) / (bottom - top);
+
+#if USE_OPENGL 
+	// -1..1
+	float z = (znear + zfar) / (znear - zfar);
+#endif
+
+	float ortho[16] = {
+		a, 0, 0, 0,
+		0, b, 0, 0,
+		0, 0, c, 0,
+		x, y, z, 1
+	};
+
+#if USE_OPENGL
+	glUniformMatrix4fv(u_projectionLoc, 1, GL_FALSE, ortho);
+#endif
+}
+
+void GR_Perspective3D(const float fov, const float width, const float height, const float zNear, const float zFar)
+{
+	float sinF, cosF;
+	sinF = sinf(0.5f * fov);
+	cosF = cosf(0.5f * fov);
+
+	float h = cosF / sinF;
+	float w = (h * height) / width;
+
+	float persp[16] = {
+		w, 0, 0, 0,
+		0, h, 0, 0,
+		0, 0, (zFar + zNear) / (zFar - zNear), 1,
+		0, 0, -(2 * zFar * zNear) / (zFar - zNear), 0
+	};
+
+#if USE_OPENGL
+	glUniformMatrix4fv(u_projection3DLoc, 1, GL_FALSE, persp);
+#endif
+}
+
+void GR_SetupClipMode(const RECT16* rect, int enable)
+{
+	// [A] isinterlaced dirty hack for widescreen
+	const bool scissorOn = enable && (activeDispEnv.isinter ||
+		(	rect->x - activeDispEnv.disp.x > 0 ||
+			rect->y - activeDispEnv.disp.y > 0 ||
+			rect->w < activeDispEnv.disp.w - 1 ||
+			rect->h < activeDispEnv.disp.h - 1));
+
+	GR_SetScissorState(scissorOn);
+
+	if (!scissorOn)
+		return;
+
+#if USE_PGXP
+	const float emuScreenAspect = 1.0f / (PSX_SCREEN_ASPECT * (float)g_windowWidth / (float)g_windowHeight);
+#else
+	const float emuScreenAspect = 1.0f;
+#endif
+
+	const float psxScreenWInv = 1.0f / (float)activeDispEnv.disp.w;
+	const float psxScreenHInv = 1.0f / (float)activeDispEnv.disp.h;
+
+	// first map to 0..1
+	float clipRectX = (float)(rect->x - activeDispEnv.disp.x) * psxScreenWInv;
+	float clipRectY = (float)(rect->y - activeDispEnv.disp.y) * psxScreenHInv;
+	float clipRectW = (float)(rect->w) * psxScreenWInv;
+	float clipRectH = (float)(rect->h) * psxScreenHInv;
+
+	// then map to screen
+	{
+		clipRectX -= 0.5f;
+
+		clipRectX *= emuScreenAspect;
+		clipRectW *= emuScreenAspect;
+
+		clipRectX += 0.5f;
+	}
+
+#if USE_OPENGL
+	// adjust scissor rectangle by the backbuffer size (window dimensions)
+	// lain: relative to the 4:3 view rectangle
+	int vx, vy, vw, vh;
+	GR_GetViewRect(&vx, &vy, &vw, &vh);
+	const float flipOffset = vh - clipRectH * (float)vh;
+	const float crx = clipRectX * (float)vw;
+	const float cry = clipRectY * (float)vh;
+	const float crw = clipRectW * (float)vw;
+	const float crh = clipRectH * (float)vh;
+
+	glScissor(vx + crx, vy + flipOffset - cry, crw, crh);
+#endif
+}
+
+void PsyX_GetPSXWidescreenMappedViewport(struct _RECT16* rect)
+{
+#if USE_PGXP
+	float psxScreenW, psxScreenH;
+	float emuScreenAspect;
+
+	emuScreenAspect = (float)(g_windowWidth) / (float)(g_windowHeight);
+
+	psxScreenW = activeDispEnv.disp.w;
+	psxScreenH = activeDispEnv.disp.h;
+
+	rect->x = activeDispEnv.screen.x;
+	rect->y = activeDispEnv.screen.y;
+
+	rect->w = psxScreenW * emuScreenAspect * PSX_SCREEN_ASPECT; // windowWidth;
+	rect->h = psxScreenH; // windowHeight;
+
+	rect->x -= (rect->w - activeDispEnv.disp.w) / 2;
+
+	rect->w += rect->x;
+#else
+	rect->x = activeDispEnv.screen.x;
+	rect->y = activeDispEnv.screen.y;
+	rect->w = activeDispEnv.disp.w;
+	rect->h = activeDispEnv.disp.h;
+#endif
+}
+
+void GR_SetShader(const ShaderID shader)
+{
+	if (g_PreviousShader != shader)
+	{
+#if USE_OPENGL
+		glUseProgram(shader);
+#else
+#error
+#endif
+
+		g_PreviousShader = shader;
+	}
+}
+
+
+void GR_SetTexture(TextureID texture, TexFormat texFormat)
+{
+	GLint texLoc = 0;
+	GLint lutLoc = 0;
+	GLint bilinearFilterLoc = 0;
+	switch (texFormat)
+	{
+	case TF_4_BIT:
+		GR_SetShader(g_gpu_shader_4.shader);
+		bilinearFilterLoc = g_gpu_shader_4.bilinearFilterLoc;
+		u_projectionLoc = g_gpu_shader_4.projectionLoc;
+		u_projection3DLoc = g_gpu_shader_4.projection3DLoc;
+		texLoc = g_gpu_shader_4.texLoc;
+		lutLoc = g_gpu_shader_4.lutLoc;
+		u_texelSizeLoc = -1;
+		break;
+	case TF_8_BIT:
+		GR_SetShader(g_gpu_shader_8.shader);
+		bilinearFilterLoc = g_gpu_shader_8.bilinearFilterLoc;
+		u_projectionLoc = g_gpu_shader_8.projectionLoc;
+		u_projection3DLoc = g_gpu_shader_8.projection3DLoc;
+		texLoc = g_gpu_shader_8.texLoc;
+		lutLoc = g_gpu_shader_8.lutLoc;
+		u_texelSizeLoc = -1;
+		break;
+	case TF_16_BIT:
+		GR_SetShader(g_gpu_shader_16.shader);
+		bilinearFilterLoc = g_gpu_shader_16.bilinearFilterLoc;
+		u_projectionLoc = g_gpu_shader_16.projectionLoc;
+		u_projection3DLoc = g_gpu_shader_16.projection3DLoc;
+		texLoc = g_gpu_shader_16.texLoc;
+		lutLoc = g_gpu_shader_16.lutLoc;
+		u_texelSizeLoc = -1;
+		break;
+	case TF_32_BIT_RGBA:
+		GR_SetShader(g_gpu_shader_32_rgba.shader);
+		bilinearFilterLoc = -1;
+		u_projectionLoc = g_gpu_shader_32_rgba.projectionLoc;
+		u_projection3DLoc = g_gpu_shader_32_rgba.projection3DLoc;
+		texLoc = g_gpu_shader_32_rgba.texLoc;
+		lutLoc = -1;
+		u_texelSizeLoc = g_gpu_shader_32_rgba.texelSizeLoc;
+		break;
+	}
+
+	if (g_dbg_texturelessMode) {
+		texture = g_whiteTexture;
+	}
+
+	if (g_lastBoundTexture == texture) {
+		return;
+	}
+
+#if USE_OPENGL
+	glUniform1i(texLoc, 0);
+	glUniform1i(lutLoc, 1);
+
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, texture);
+
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, g_rgLutTexture);
+
+	glActiveTexture(GL_TEXTURE0);
+
+	if(bilinearFilterLoc != -1)
+		glUniform1i(bilinearFilterLoc, g_cfg_bilinearFiltering);
+#endif
+
+	g_lastBoundTexture = texture;
+}
+
+void GR_SetOverrideTextureSize(int width, int height)
+{
+	if(u_texelSizeLoc == -1)
+		return;
+
+	// WebGL is fucking around with glUniform2f, so use vector version
+	float vec[] = { 1.0f / (float)width, 1.0f / (float)height };
+	glUniform2fv(u_texelSizeLoc, 1, vec);
+}
+
+void GR_DestroyTexture(TextureID texture)
+{
+	if (texture == -1)
+		return;
+
+#if USE_OPENGL
+	glDeleteTextures(1, &texture);
+#else
+#error
+#endif
+}
+
+void GR_ClearVRAM(int x, int y, int w, int h, unsigned char r, unsigned char g, unsigned char b)
+{
+	vram_need_update = 1;
+
+	u_short* dst = vram + x + y * VRAM_WIDTH;
+
+	if (x + w > VRAM_WIDTH)
+		w = VRAM_WIDTH - x;
+
+	if (y + h > VRAM_HEIGHT)
+		h = VRAM_HEIGHT - y;
+
+	// clear VRAM region with given color
+	for (int i = 0; i < h; i++)
+	{
+		u_short* tmp = dst;
+
+		for (int j = 0; j < w; j++)
+			*tmp++ = (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10); // lain: was r | g << 5 | b << 11 (8-bit values)
+
+		dst += VRAM_WIDTH;
+	}
+}
+
+extern "C" void LainInterp_NoteClear(int x, int y, int w, int h, u_char r, u_char g, u_char b);
+
+void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsigned char b)
+{
+	LainInterp_NoteClear(x, y, w, h, r, g, b); // lain: frame interpolation
+	framebuffer_need_update = 1;
+
+#if USE_OPENGL
+	// lain: clear only the part of the window that shows VRAM (x, y, w, h)
+	const RECT16* d = &activeDispEnv.disp;
+	int x0 = x > d->x ? x : d->x, y0 = y > d->y ? y : d->y;
+	int x1 = x + w < d->x + d->w ? x + w : d->x + d->w;
+	int y1 = y + h < d->y + d->h ? y + h : d->y + d->h;
+	if (x1 <= x0 || y1 <= y0 || d->w <= 0 || d->h <= 0)
+		return;
+
+	int vx, vy, vw, vh;
+	GR_GetViewRect(&vx, &vy, &vw, &vh);
+	const int sx0 = vx + (x0 - d->x) * vw / d->w, sx1 = vx + (x1 - d->x) * vw / d->w;
+	const int sy0 = vy + vh - (y1 - d->y) * vh / d->h, sy1 = vy + vh - (y0 - d->y) * vh / d->h;
+
+	glEnable(GL_SCISSOR_TEST);
+	glScissor(sx0, sy0, sx1 - sx0, sy1 - sy0);
+	glClearColor(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glDisable(GL_SCISSOR_TEST);
+	g_PreviousScissorState = 0;
+#endif
+}
+
+void GR_SaveVRAM(const char* outputFileName, int x, int y, int width, int height, int bReadFromFrameBuffer)
+{
+#if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
+
+#if USE_OPENGL
+
+#define FLIP_Y (VRAM_HEIGHT - i - 1)
+
+#endif
+
+	FILE* fp = fopen(outputFileName, "wb");
+	if (fp == NULL)
+		return;
+
+	unsigned char TGAheader[12] = { 0,0,2,0,0,0,0,0,0,0,0,0 };
+	unsigned char header[6];
+	header[0] = (width % 256);
+	header[1] = (width / 256);
+	header[2] = (height % 256);
+	header[3] = (height / 256);
+	header[4] = 16;
+	header[5] = 0;
+
+	fwrite(TGAheader, sizeof(unsigned char), 12, fp);
+	fwrite(header, sizeof(unsigned char), 6, fp);
+
+	for (int i = 0; i < VRAM_HEIGHT; i++)
+	{
+		fwrite(vram + VRAM_WIDTH * FLIP_Y, sizeof(short), VRAM_WIDTH, fp);
+	}
+
+	fclose(fp);
+
+#undef FLIP_Y
+#endif
+}
+
+void GR_CopyRGBAFramebufferToVRAM(u_int* src, int x, int y, int w, int h, int update_vram, int flip_y)
+{
+	assert(x >= 0);
+	assert(y >= 0);
+	assert(x + w <= VRAM_WIDTH);
+	assert(y + h <= VRAM_WIDTH);
+
+	ushort* fb = (ushort*)malloc(w * h * sizeof(ushort));
+	uint* data_src = (uint*)src;
+	ushort* data_dst = (ushort*)fb;
+
+	for (int i = 0; i < h; i++)
+	{
+		for (int j = 0; j < w; j++)
+		{
+			uint c = *data_src++;
+
+			u_char b = ((c >> 3) & 0x1F);
+			u_char g = ((c >> 11) & 0x1F);
+			u_char r = ((c >> 19) & 0x1F);
+			//u_char a = ((c >> 24) & 0x1F);
+
+			int a = r == g == b == 0 ? 0 : 1;
+
+			*data_dst++ = r | (g << 5) | (b << 10) | (a << 15);
+		}
+	}
+
+	ushort* ptr = (ushort*)vram + VRAM_WIDTH * y + x;
+
+	for (int fy = 0; fy < h; fy++)
+	{
+		int py = flip_y ? (h - fy - 1) : fy;
+		ushort* fb_ptr = fb + (h * py / h) * w;
+
+		for (int fx = 0; fx < w; fx++)
+			ptr[fx] = fb_ptr[w * fx / w];
+
+		ptr += VRAM_WIDTH;
+	}
+
+	free(fb);
+
+	if (update_vram)
+		vram_need_update = 1;
+}
+
+void GR_ReadFramebufferDataToVRAM()
+{
+	int x, y, w, h;
+	if (!framebuffer_need_update)
+		return;
+
+	framebuffer_need_update = 0;
+
+	// lain: in 24-bit mode the window isn't stored back (PsyX_EndScene); reading
+	// the stale stored frame into VRAM would overwrite the 24-bit picture.
+	if (activeDispEnv.isrgb24)
+		return;
+
+	x = g_PreviousFramebuffer.x;
+	y = g_PreviousFramebuffer.y;
+	w = g_PreviousFramebuffer.w;
+	h = g_PreviousFramebuffer.h;
+
+	// now we can read it back to VRAM texture
+
+#if USE_OPENGL && defined(USE_PBO)
+	// read the texture
+	if(g_glFramebufferPBO.pixels)
+	{
+		glBindTexture(GL_TEXTURE_2D, g_fbTexture);
+		PBO_Download(&g_glFramebufferPBO);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		GR_CopyRGBAFramebufferToVRAM((u_int*)g_glFramebufferPBO.pixels, x, y, w, h, 0, 0);
+	}
+#endif
+}
+
+void GR_SetScissorState(int enable)
+{
+	if (g_PreviousScissorState == enable)
+		return;
+
+#if USE_OPENGL
+	if (g_PreviousScissorState)
+		glDisable(GL_SCISSOR_TEST);
+	else
+		glEnable(GL_SCISSOR_TEST);
+#endif
+	g_PreviousScissorState = enable;
+}
+
+void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
+{
+	if (enable)
+	{
+		// setup render target viewport
+#if USE_PGXP
+		GR_Ortho2D(-0.5f, 0.5f, 0.5f, -0.5f, -1.0f, 1.0f);
+#else
+		GR_Ortho2D(0, offscreenRect->w, offscreenRect->h, 0, -1.0f, 1.0f);
+#endif
+	}
+	else
+	{
+		// setup default viewport
+#if USE_PGXP
+
+		// these constants below are guessed
+		const float perspectiveFOV = 0.9265f;
+		const float perspectiveZNear = 0.25f;
+		const float perspectiveZFar = 1000.0f;
+
+		const float emuScreenAspect = (float)(g_windowWidth) / (float)(g_windowHeight);
+
+		GR_Ortho2D(-0.5f * emuScreenAspect * PSX_SCREEN_ASPECT, 0.5f * emuScreenAspect * PSX_SCREEN_ASPECT, 0.5f, -0.5f, -1.0f, 1.0f);
+		GR_Perspective3D(perspectiveFOV, 1.0f, 1.0f / (emuScreenAspect * PSX_SCREEN_ASPECT), perspectiveZNear, perspectiveZFar);
+#else
+		GR_Ortho2D(0, activeDispEnv.disp.w, activeDispEnv.disp.h, 0, -1.0f, 1.0f);
+#endif
+	}
+
+	if (g_PreviousOffscreenState == enable)
+		return;
+
+	g_PreviousOffscreenState = enable;
+
+#if USE_OPENGL
+	if (enable)
+	{
+		// set storage size first
+		if (g_PreviousOffscreen.w != offscreenRect->w &&
+			g_PreviousOffscreen.h != offscreenRect->h)
+		{
+			glBindTexture(GL_TEXTURE_2D, g_offscreenRTTexture);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, offscreenRect->w, offscreenRect->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+			glBindTexture(GL_TEXTURE_2D, 0);
+		}
+
+		g_PreviousOffscreen = *offscreenRect;
+
+		GR_SetViewPort(0, 0, offscreenRect->w, offscreenRect->h);
+		glBindFramebuffer(GL_FRAMEBUFFER, g_glOffscreenFramebuffer);
+
+		// clear it out
+		glClearColor(0.5f, 0.5f, 0.5f, 0.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+	}
+	else
+	{
+		{
+			int vx, vy, vw, vh; // lain: 4:3 view
+			GR_GetViewRect(&vx, &vy, &vw, &vh);
+			GR_SetViewPort(vx, vy, vw, vh);
+		}
+
+#if USE_OFFSCREEN_BLIT
+		// before drawing set source and target
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, g_glVRAMFramebuffer);
+
+			// rebind texture
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
+
+			// setup draw and read framebuffers
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, g_glOffscreenFramebuffer);					// source is backbuffer
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_glVRAMFramebuffer);
+
+			glBlitFramebuffer(0, 0, g_PreviousOffscreen.w, g_PreviousOffscreen.h, 
+								g_PreviousOffscreen.x, g_PreviousOffscreen.y + g_PreviousOffscreen.h, g_PreviousOffscreen.x + g_PreviousOffscreen.w, g_PreviousOffscreen.y,
+								GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+			// done, unbind
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, g_screenFramebuffer);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_screenFramebuffer);
+		}
+#endif
+		
+		glBindFramebuffer(GL_FRAMEBUFFER, g_screenFramebuffer);
+		// copy rendering results to VRAM texture
+		{
+			// reat the texture
+			glBindTexture(GL_TEXTURE_2D, g_offscreenRTTexture);
+			//glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+			PBO_Download(&g_glOffscreenPBO);
+			glBindTexture(GL_TEXTURE_2D, g_lastBoundTexture);
+
+			// Don't forcely update VRAM
+			GR_CopyRGBAFramebufferToVRAM((u_int*)g_glOffscreenPBO.pixels, 
+				g_PreviousOffscreen.x, g_PreviousOffscreen.y, g_PreviousOffscreen.w, g_PreviousOffscreen.h, 
+				USE_OFFSCREEN_BLIT == 0, 1);
+		}
+
+	}
+#endif
+}
+
+void GR_StoreFrameBuffer(int x, int y, int w, int h)
+{
+#if USE_OPENGL
+	// set storage size first
+	if (g_PreviousFramebuffer.w != w ||
+		g_PreviousFramebuffer.h != h)
+	{
+		glBindTexture(GL_TEXTURE_2D, g_fbTexture);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+
+	g_PreviousFramebuffer.x = x;
+	g_PreviousFramebuffer.y = y;
+	g_PreviousFramebuffer.w = w;
+	g_PreviousFramebuffer.h = h;
+
+#if USE_FRAMEBUFFER_BLIT
+	glBindFramebuffer(GL_FRAMEBUFFER, g_glBlitFramebuffer);
+
+	// before drawing set source and target
+	{
+		// setup draw and read framebuffers
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_screenFramebuffer);					// source is backbuffer
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_glBlitFramebuffer);
+
+		int vx, vy, vw, vh; // lain: only the 4:3 view
+		GR_GetViewRect(&vx, &vy, &vw, &vh);
+		glBlitFramebuffer(vx, vy, vx + vw, vy + vh, x, y + h, x + w, y, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+		// Blit framebuffer to VRAM screen area
+
+		// before drawing set source and target
+		glBindFramebuffer(GL_FRAMEBUFFER, g_glVRAMFramebuffer);
+
+		// rebind vram texture
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
+
+		// setup draw and read framebuffers
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_glBlitFramebuffer);					// source is backbuffer
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_glVRAMFramebuffer);
+
+		glBlitFramebuffer(0, 0, w, h,
+			x, y + h, x + w, y,
+			GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+		
+		// done, unbind
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_screenFramebuffer);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_screenFramebuffer);
+	}
+
+	// after drawing
+	glBindFramebuffer(GL_FRAMEBUFFER, g_screenFramebuffer);
+	glFlush();
+#endif
+
+	GR_ReadFramebufferDataToVRAM();
+#endif
+}
+
+void GR_CopyVRAM(unsigned short* src, int x, int y, int w, int h, int dst_x, int dst_y)
+{
+	vram_need_update = 1;
+
+	int stride = w;
+
+	if (!src)
+	{
+		framebuffer_need_update = 1;
+
+		src = vram;
+		stride = VRAM_WIDTH;
+	}
+
+	src += x + y * stride;
+
+	unsigned short* dst = vram + dst_x + dst_y * VRAM_WIDTH;
+
+	for (int i = 0; i < h; i++) {
+		SDL_memcpy(dst, src, w * sizeof(short));
+		dst += VRAM_WIDTH;
+		src += stride;
+	}
+}
+
+void GR_ReadVRAM(unsigned short* dst, int x, int y, int dst_w, int dst_h)
+{
+	unsigned short* src = vram + x + VRAM_WIDTH * y;
+
+	for (int i = 0; i < dst_h; i++) {
+		SDL_memcpy(dst, src, dst_w * sizeof(short));
+		dst += dst_w;
+		src += VRAM_WIDTH;
+	}
+}
+
+void GR_UpdateVRAM()
+{
+	if (!vram_need_update)
+		return;
+
+	vram_need_update = 0;
+
+#if USE_OPENGL
+	g_vramTexture = g_vramTexturesDouble[g_vramTextureIdx];
+	g_vramTextureIdx++;
+	g_vramTextureIdx &= 1;
+
+	glBindTexture(GL_TEXTURE_2D, g_vramTexture);
+
+#if defined(RENDERER_OGL)
+	glTexImage2D(GL_TEXTURE_2D, 0, VRAM_INTERNAL_FORMAT, VRAM_WIDTH, VRAM_HEIGHT, 0, VRAM_FORMAT, GL_UNSIGNED_BYTE, vram);
+#else
+	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, VRAM_WIDTH, VRAM_HEIGHT, VRAM_FORMAT, GL_UNSIGNED_BYTE, vram);
+#endif
+
+#endif
+}
+
+// lain: the PS1 GPU draws into VRAM, so whatever the game put into the display
+// area with LoadImage/MoveImage (movie frames, pictures) shows through where the
+// frame draws nothing. PsyCross renders into the window instead, so start each
+// frame with the display area of VRAM (15-bit, or 24-bit for movies).
+void GR_DrawVRAMBackground(int x, int y, int w, int h, int rgb24)
+{
+#if USE_OPENGL && USE_FRAMEBUFFER_BLIT
+	static GLuint tex = 0, fbo = 0;
+	static u_int* rgba = NULL;
+	static int texW = 0, texH = 0;
+
+	if (w <= 0 || h <= 0 || w > VRAM_WIDTH || h > VRAM_HEIGHT)
+		return;
+
+	if (!rgba)
+		rgba = (u_int*)malloc(VRAM_WIDTH * VRAM_HEIGHT * sizeof(u_int));
+
+	for (int j = 0; j < h; j++)
+	{
+		const int vy = (y + j) & (VRAM_HEIGHT - 1);
+		const u_short* row = vram + vy * VRAM_WIDTH;
+		u_int* out = rgba + j * w;
+
+		if (rgb24)
+		{
+			const u_char* bytes = (const u_char*)(row + x);
+			for (int i = 0; i < w; i++)
+			{
+				// three bytes per pixel, R G B, starting at VRAM word x
+				if (x + (i * 3 + 2) / 2 >= VRAM_WIDTH)
+				{
+					out[i] = 0xFF000000;
+					continue;
+				}
+				out[i] = bytes[i * 3] | (bytes[i * 3 + 1] << 8) | (bytes[i * 3 + 2] << 16) | 0xFF000000;
+			}
+		}
+		else
+		{
+			for (int i = 0; i < w; i++)
+			{
+				const u_short c = row[(x + i) & (VRAM_WIDTH - 1)];
+				const u_int r = (c & 31) << 3, g = ((c >> 5) & 31) << 3, b = ((c >> 10) & 31) << 3;
+				out[i] = r | (g << 8) | (b << 16) | 0xFF000000;
+			}
+		}
+	}
+
+	if (!tex)
+	{
+		glGenTextures(1, &tex);
+		glGenFramebuffers(1, &fbo);
+	}
+	glBindTexture(GL_TEXTURE_2D, tex);
+	if (texW != w || texH != h)
+	{
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+		texW = w;
+		texH = h;
+	}
+	else
+	{
+		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+	}
+	glBindTexture(GL_TEXTURE_2D, 0);
+	g_lastBoundTexture = 0;
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_screenFramebuffer);
+
+	GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+	glDisable(GL_SCISSOR_TEST);
+	// texture row 0 is the top of the display: flip into GL window coordinates
+	int vx, vy, vw, vh;
+	GR_GetViewRect(&vx, &vy, &vw, &vh);
+	glBlitFramebuffer(0, 0, w, h, vx, vy + vh, vx + vw, vy, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+	if (scissor)
+		glEnable(GL_SCISSOR_TEST);
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, g_screenFramebuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, g_screenFramebuffer);
+#endif
+}
+
+void GR_SwapWindow()
+{
+#if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
+	SDL_GL_SwapWindow(g_window);
+#endif
+
+	//glFinish();
+}
+
+void GR_EnableDepth(int enable)
+{
+	if (g_PreviousDepthMode == enable)
+		return;
+
+	g_PreviousDepthMode = enable;
+
+#if USE_OPENGL
+	if (enable && g_cfg_pgxpZBuffer)
+		glEnable(GL_DEPTH_TEST);
+	else
+		glDisable(GL_DEPTH_TEST);
+#endif
+}
+
+void GR_SetStencilMode(int drawPrim)
+{
+	if (g_PreviousStencilMode == drawPrim)
+		return;
+
+	g_PreviousStencilMode = drawPrim;
+
+#if USE_OPENGL
+	if (drawPrim)
+	{
+		glStencilFunc(GL_ALWAYS, 1, 0x10);
+		glStencilOp(GL_REPLACE, GL_REPLACE, GL_REPLACE);
+	}
+	else
+	{
+		glStencilFunc(GL_NOTEQUAL, 1, 0xFF);
+		glStencilOp(GL_REPLACE, GL_KEEP, GL_KEEP);
+	}
+#endif
+}
+
+void GR_SetBlendMode(BlendMode blendMode)
+{
+	if (g_PreviousBlendMode == blendMode)
+		return;
+
+#if USE_OPENGL
+	if (blendMode == BM_NONE)
+	{
+		if (g_PreviousBlendMode != BM_NONE)
+		{
+			glBlendColor(1.f, 1.f, 1.f, 1.f);
+			glDisable(GL_BLEND);
+		}
+
+		g_PreviousBlendMode = blendMode;
+		GR_EnableDepth(1);
+		return;
+	}
+	else
+	{
+		if(g_PreviousBlendMode == BM_NONE)
+		{
+			glBlendColor(0.25f, 0.25f, 0.25f, 0.5f);
+			glEnable(GL_BLEND);
+		}
+
+		g_PreviousBlendMode = blendMode;
+		GR_EnableDepth(0);
+	}
+
+	glBlendEquationSeparate(blendMode == BM_SUBTRACT ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, GL_FUNC_ADD);
+	switch (blendMode) {
+	case BM_AVERAGE:
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		break;
+	case BM_ADD:
+	case BM_SUBTRACT:
+		glBlendFunc(GL_ONE, GL_ONE);
+		break;
+	case BM_ADD_QUATER_SOURCE:
+		glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE); 
+		break;
+	}
+#endif
+
+	g_PreviousBlendMode = blendMode;
+}
+
+void GR_SetPolygonOffset(float ofs)
+{
+#if USE_OPENGL
+	if (ofs == 0.0f)
+	{
+		glDisable(GL_POLYGON_OFFSET_FILL);
+	}
+	else
+	{
+		glEnable(GL_POLYGON_OFFSET_FILL);
+		glPolygonOffset(0.0f, ofs);
+	}
+#endif
+}
+
+void GR_SetViewPort(int x, int y, int width, int height)
+{
+#if USE_OPENGL
+	glViewport(x, y, width, height);
+#endif
+}
+
+void GR_SetWireframe(int enable)
+{
+#if defined(RENDERER_OGL)
+	glPolygonMode(GL_FRONT_AND_BACK, enable ? GL_LINE : GL_FILL);
+#endif
+}
+
+void GR_BindVertexBuffer()
+{
+#if USE_OPENGL
+	glBindVertexArray(g_glVertexArray[g_curVertexBuffer]);
+
+	glEnableVertexAttribArray(a_position);
+	glEnableVertexAttribArray(a_texcoord);
+	glEnableVertexAttribArray(a_color);
+	glEnableVertexAttribArray(a_extra);
+
+#if USE_PGXP
+	glVertexAttribPointer(a_position, 4, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->x);
+	glVertexAttribPointer(a_zw, 4, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->z);
+
+	glEnableVertexAttribArray(a_zw);
+#else
+	glVertexAttribPointer(a_position, 4, GL_SHORT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->x);
+#endif
+	glVertexAttribPointer(a_texcoord, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->u);
+	glVertexAttribPointer(a_color, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GrVertex), &((GrVertex*)NULL)->r);
+	glVertexAttribPointer(a_extra, 4, GL_BYTE, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->tcx);
+
+	g_curVertexBuffer++;
+	g_curVertexBuffer &= 1;
+#else
+#error
+#endif
+}
+
+void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
+{
+	if (num_vertices >= MAX_VERTEX_BUFFER_SIZE)
+	{
+		eprinterr("MAX_VERTEX_BUFFER_SIZE reached, expect rendering errors\n");
+		num_vertices = MAX_VERTEX_BUFFER_SIZE;
+	}
+
+	//assert(num_vertices <= MAX_VERTEX_BUFFER_SIZE);
+	GR_BindVertexBuffer();
+
+#if USE_OPENGL
+	glBufferSubData(GL_ARRAY_BUFFER, 0, num_vertices * sizeof(GrVertex), vertices);
+#else
+#error
+#endif
+}
+
+void GR_DrawTriangles(int start_vertex, int triangles)
+{
+#if USE_OPENGL
+	glDrawArrays(GL_TRIANGLES, start_vertex, triangles * 3);
+#else
+#error
+#endif
+}
+
+void GR_PushDebugLabel(const char* label)
+{
+#if USE_OPENGL && !defined(__EMSCRIPTEN__) && defined(GL_DEBUG_SOURCE_APPLICATION)
+	if (!glPushDebugGroup)
+		return;
+	glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0x8000, strlen(label), label);
+#endif
+}
+
+void GR_PopDebugLabel()
+{
+#if USE_OPENGL && !defined(__EMSCRIPTEN__) && defined(GL_DEBUG_SOURCE_APPLICATION)
+	if (!glPopDebugGroup)
+		return;
+	glPopDebugGroup();
+#endif
+}

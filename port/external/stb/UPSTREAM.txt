@@ -1,0 +1,1 @@
+stb_vorbis v1.22 (public domain), https://github.com/nothings/stb

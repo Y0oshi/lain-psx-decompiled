@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Identify statically linked PsyQ library objects in the executable.
+
+Uses the signature set from github.com/lab313ru/psx_psyq_signatures (cloned into
+.cache/psyq_sigs). Scores every SDK version, then writes the label names
+of the best version's unique matches as splat symbol_addrs entries.
+
+Usage:
+    tools/psyq_match.py scan                 # score SDK versions
+    tools/psyq_match.py emit --version 430   # print symbol_addrs lines
+    tools/psyq_match.py objects --version 430  # print matched object ranges
+    tools/psyq_match.py gen                  # write config/psyq_symbols.txt, print splat segments
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import struct
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SIGS = ROOT / ".cache/psyq_sigs"
+EXE = ROOT / "extract/disc1/SLPS_016.03"
+HEADER = 0x800
+VRAM = 0x80010000
+TEXT_START, TEXT_END = 0x80013074, 0x80070F50
+# Game code sits between the startup object (2MBYTE.OBJ) and the first library
+# object; the linker places libraries after it. Signature hits inside this range
+# are false positives.
+GAME_START, GAME_END = 0x80013138, 0x8003E864  # 8003E864-8003E8A4: BIOS stubs
+# Base SDK plus per-library overrides (libpad was shipped separately and is newer).
+SDK_LAYERS = [("430", None), ("450", "LIBPAD")]
+MIN_SIG_BYTES = 16
+# Local labels in the signature set, not real symbols.
+LOCAL_LABEL = re.compile(r"^(loc|text|data|rdata|sdata|bss|sbss)_[0-9A-Fa-f]+$")
+
+
+def load_text() -> bytes:
+    data = EXE.read_bytes()[HEADER:]
+    return data[TEXT_START - VRAM:TEXT_END - VRAM]
+
+
+def sig_regex(sig: str) -> tuple[re.Pattern, int] | None:
+    toks = sig.split()
+    while toks and toks[-1] == "00":  # alignment padding after the last function
+        toks.pop()
+    if sum(t != "??" for t in toks) < MIN_SIG_BYTES:
+        return None
+    pat = b"".join(b"." if t == "??" else re.escape(bytes([int(t, 16)])) for t in toks)
+    return re.compile(pat, re.DOTALL), len(toks)
+
+
+def matches_for_version(text: bytes, version_dir: Path):
+    """Yield (lib, obj, text_offset, obj_json, length) for objects matching exactly once."""
+    for lib in sorted(version_dir.glob("*.json")):
+        for obj in json.loads(lib.read_text()):
+            compiled = sig_regex(obj["sig"]) if obj.get("sig") else None
+            if compiled is None:
+                continue
+            rx, length = compiled
+            hits = [m.start() for m in rx.finditer(text) if m.start() % 4 == 0]
+            if len(hits) == 1:
+                yield lib.stem, obj["name"], hits[0], obj, length
+
+
+def cmd_scan(text: bytes) -> None:
+    results = []
+    for vdir in sorted(p for p in SIGS.iterdir() if p.is_dir() and p.name.isdigit()):
+        found = list(matches_for_version(text, vdir))
+        size = sum(f[4] for f in found)
+        results.append((size, len(found), vdir.name))
+        print(f"PsyQ {vdir.name:>5}: {len(found):4d} objects, {size:7d} bytes")
+    best = max(results)
+    print(f"\nbest: {best[2]}")
+
+
+def cmd_emit(text: bytes, version: str) -> None:
+    seen: dict[int, str] = {}
+    for lib, obj, off, o, _ in matches_for_version(text, SIGS / version):
+        for label in o.get("labels", []):
+            addr = TEXT_START + off + label["offset"]
+            if addr >= TEXT_END or addr in seen or LOCAL_LABEL.match(label["name"]):
+                continue
+            seen[addr] = label["name"]
+            print(f"{label['name']} = 0x{addr:08X}; // type:func  {lib}/{obj}")
+
+
+def cmd_objects(text: bytes, version: str) -> None:
+    """Print matched object ranges (vram start, end, lib/obj), non-overlapping."""
+    found = sorted(matches_for_version(text, SIGS / version), key=lambda f: f[2])
+    last_end = 0
+    for lib, obj, off, _, length in found:
+        if off < last_end:
+            continue
+        # Round up to the word; trailing padding was stripped from the signature.
+        end = (off + length + 3) & ~3
+        print(f"0x{TEXT_START + off:08X} 0x{TEXT_START + end:08X} {lib}/{obj}")
+        last_end = end
+
+
+def layered_matches(text: bytes):
+    """Unique, non-overlapping matches from SDK_LAYERS, sorted by address."""
+    taken: list[tuple[int, int]] = []
+    out = []
+    for version, only_lib in SDK_LAYERS:
+        for lib, obj, off, o, length in matches_for_version(text, SIGS / version):
+            if only_lib and lib != f"{only_lib}.LIB":
+                continue
+            start, end = TEXT_START + off, (TEXT_START + off + length + 3) & ~3
+            if GAME_START <= start < GAME_END:
+                continue
+            if any(start < b and a < end for a, b in taken):
+                continue
+            taken.append((start, end))
+            out.append((start, end, lib, obj, o))
+    return sorted(out)
+
+
+def cmd_gen(text: bytes) -> None:
+    """Write config/psyq_symbols.txt and print splat subsegments for .text."""
+    found = layered_matches(text)
+    lines = ["// Generated by tools/psyq_match.py gen from psx_psyq_signatures. Do not edit."]
+    seen = set()
+    for start, _, lib, obj, o in found:
+        for label in o.get("labels", []):
+            addr = start + label["offset"]
+            name = label["name"]
+            if LOCAL_LABEL.match(name) or addr in seen or name in seen:
+                continue
+            seen.update((addr, name))
+            lines.append(f"{name} = 0x{addr:08X}; // type:func")
+    (ROOT / "config/psyq_symbols.txt").write_text("\n".join(lines) + "\n")
+
+    def seg(vram: int, name: str) -> str:
+        return f"      - [0x{vram - VRAM + HEADER:X}, asm, {name}]"
+
+    words = struct.unpack_from(f"<{len(text) // 4}I", text)
+    def is_padding(a: int, b: int) -> bool:
+        return not any(words[(a - TEXT_START) // 4:(b - TEXT_START) // 4])
+
+    segs = [seg(found[0][0], "psyq/startup"), seg(GAME_START, "game")]
+    cursor = GAME_END
+    for start, end, lib, obj, _ in found[1:]:
+        if start > cursor and not is_padding(cursor, start):
+            segs.append(seg(cursor, f"psyq/unknown_{cursor:08X}"))
+        name = f"psyq/{lib[:-4].lower()}/{obj[:-4].lower()}"
+        segs.append(seg(start, name))
+        cursor = max(cursor, end)
+    if cursor < TEXT_END and not is_padding(cursor, TEXT_END):
+        segs.append(seg(cursor, f"psyq/unknown_{cursor:08X}"))
+    print("\n".join(segs))
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("command", choices=["scan", "emit", "objects", "gen"])
+    ap.add_argument("--version", default="430")
+    args = ap.parse_args()
+    text = load_text()
+    assert struct.unpack_from("<I", text, 0)[0] == 0x03E00008, "unexpected .text start"
+    if args.command == "scan":
+        cmd_scan(text)
+    elif args.command == "gen":
+        cmd_gen(text)
+    elif args.command == "emit":
+        cmd_emit(text, args.version)
+    else:
+        cmd_objects(text, args.version)
+
+
+if __name__ == "__main__":
+    main()

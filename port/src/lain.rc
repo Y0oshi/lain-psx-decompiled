@@ -1,0 +1,3 @@
+/* Embeds lain.manifest (RT_MANIFEST = 24) and the program icon in lain.exe. */
+1 24 "lain.manifest"
+1 ICON "lain.ico"

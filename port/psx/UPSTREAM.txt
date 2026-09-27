@@ -1,0 +1,2 @@
+Vendored from https://github.com/OpenDriver2/PsyCross at e56e4cde1c2b8a15e0d4e38b26cdd9202e0d17e6 (MIT, see LICENSE).
+Local changes are marked "lain:" in comments and listed in port/PORTING.md.

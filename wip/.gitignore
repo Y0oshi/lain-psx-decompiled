@@ -1,0 +1,5 @@
+# Work-in-progress drafts of large functions (integrated into src/ when done).
+# Only the main draft per function is tracked; permutation/scratch files are not.
+*
+!.gitignore
+!func_????????.c

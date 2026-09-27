@@ -1,0 +1,1 @@
+Forked from ../src/game at 82fd288. The decompilation in ../src stays the reference; this copy is made portable (64-bit, host data loading).
