@@ -108,6 +108,7 @@ then `maspsx --aspsx-version=2.79 --expand-div --macro-inc --use-comm-section`
 | `tools/fdiff.sh <func> <file.c>` | Side-by-side asm diff |
 | `tools/whatdiff.py` | After `make`: which functions differ from retail |
 | `tools/progress.py` | Matched / non-matching counts (`--files` for a per-file breakdown) |
+| `tools/objdiff_config.py` | objdiff units and target asm for `make report` (decomp.dev progress, see [MATCHING.md](MATCHING.md#progress-report-decompdev)) |
 | `tools/psyq_match.py` | PsyQ library identification from signatures |
 | `tools/rename.py` | Renames a symbol in `config/`, `src/`, `include/`, the docs and `port/` |
 | `tools/permute.sh` | decomp-permuter run for one function |

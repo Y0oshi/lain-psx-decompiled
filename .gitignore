@@ -25,3 +25,6 @@ port/build/
 
 # Packaged builds
 dist/
+
+# objdiff-cli (tools/get_objdiff.sh)
+tools/bin/

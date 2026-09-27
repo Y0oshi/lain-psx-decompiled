@@ -1,0 +1,21 @@
+# Publishes the committed objdiff progress report for decomp.dev. The report is
+# generated locally (make report, see docs/MATCHING.md) because the build needs
+# the game EXE; it holds only names, sizes and percentages.
+name: progress
+
+on:
+  push:
+    branches: [main]
+    paths: ["progress/**", ".github/workflows/progress.yml"]
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: mkdir -p out && cp progress/SLPS_016.03_report.json out/report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SLPS_016.03_report
+          path: out/report.json

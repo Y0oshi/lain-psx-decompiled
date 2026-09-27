@@ -9,6 +9,10 @@
  * maspsx unwraps (see the maspsx README, "INCLUDE_ASM reordering workaround").
  */
 #if !defined(M2CTX) && !defined(PERMUTER)
+#if defined(SKIP_ASM)
+/* objdiff base objects (make objdiff): the C only, no original functions. */
+#define INCLUDE_ASM(FOLDER, NAME)
+#else
 #define INCLUDE_ASM(FOLDER, NAME)                                  \
     void __maspsx_include_asm_hack_##NAME(void) {                  \
         __asm__(".text # maspsx-keep\n"                            \
@@ -19,6 +23,7 @@
                 "\t.set reorder # maspsx-keep\n"                   \
                 "\t.set at # maspsx-keep\n");                      \
     }
+#endif
 /* Unmigrated .rodata (orphan strings/tables), placed in address order in the file. */
 #define INCLUDE_RODATA(FOLDER, NAME)                               \
     void __maspsx_include_asm_hack_rodata_##NAME(void) {           \
