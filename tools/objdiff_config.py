@@ -93,7 +93,11 @@ def main() -> None:
                 "name": name,
                 "target_path": f"build/objdiff/target/src/{name}.o",
                 "base_path": f"build/objdiff/base/src/{name}.o",
-                "metadata": {"progress_categories": ["game"], "source_path": f"src/{name}.c"},
+                "metadata": {
+                    "progress_categories": ["game"],
+                    "source_path": f"src/{name}.c",
+                    "complete": "#ifdef NON_MATCHING" not in (ROOT / f"src/{name}.c").read_text(),
+                },
             })
         elif not name.startswith("psyq/"):
             # PsyQ SDK objects are Sony's library, linked as is: not part of the
