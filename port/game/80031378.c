@@ -523,6 +523,8 @@ void movie_models_update(s16 input) {
                         g_movie_model1_spin = 0;
                         g_models[41 + i].rot.vy = g_movie_model0_spin;
                     }
+                } else {
+                    g_models[41 + i].rot.vy = 0;
                 }
             } else {
                 model_map_tmd(g_movie_model_tmds[g_movie_model_kinds[i]], &g_models[41 + i]);
