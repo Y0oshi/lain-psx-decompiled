@@ -89,8 +89,10 @@ void *gs_alloc_packet(size_t size) {
 static struct {
     const void *pkt;
     uint64_t tag;
+    int is2d;
 } gs_tags[GS_TAG_SLOTS];
 static uint64_t gs_cur_tag;
+static int gs_cur_2d;
 static u_int gs_cur_sub;
 
 #define GS_OCC_SLOTS 1024u
@@ -131,6 +133,12 @@ uint64_t gs_source_key(const void *src) {
 void gs_set_tag(uint64_t key, u_int index) {
     gs_cur_tag = key ? gs_mix(key + index) | 1 : 0;
     gs_cur_sub = 0;
+    gs_cur_2d = 0;
+}
+
+void gs_set_tag_2d(uint64_t key) {
+    gs_set_tag(key, 0);
+    gs_cur_2d = 1;
 }
 
 static void gs_note_packet(const void *pkt) {
@@ -138,12 +146,20 @@ static void gs_note_packet(const void *pkt) {
 
     gs_tags[h].pkt = pkt;
     gs_tags[h].tag = gs_cur_tag ? gs_cur_tag + gs_cur_sub++ : 0;
+    gs_tags[h].is2d = gs_cur_2d;
 }
 
 uint64_t LainGs_PacketTag(const void *pkt) {
     u_int h = (u_int)(((uintptr_t)pkt >> 4) & (GS_TAG_SLOTS - 1));
 
     return gs_tags[h].pkt == pkt ? gs_tags[h].tag : 0;
+}
+
+/* A 2D sprite, line or polygon from GsSort* rather than a TMD. */
+int LainGs_PacketIs2D(const void *pkt) {
+    u_int h = (u_int)(((uintptr_t)pkt >> 4) & (GS_TAG_SLOTS - 1));
+
+    return gs_tags[h].pkt == pkt && gs_tags[h].is2d;
 }
 
 /* Ordering tables */

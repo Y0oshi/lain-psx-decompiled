@@ -7,6 +7,8 @@
 
 #include <math.h>
 
+extern "C" void LainInterp_NoteProjection(int sx, int sy, const short* v, const int* r, const int* t, int h, int ofx, int ofy);
+
 
 
 GTERegisters gteRegs;
@@ -394,6 +396,14 @@ int GTE_RotTransPers(int idx, int lm)
 	C2_SXY1 = C2_SXY2;
 	C2_SX2 = Lm_G1(F((long long)C2_OFX + ((long long)C2_IR1 * h_over_sz3)) >> 16);
 	C2_SY2 = Lm_G2(F((long long)C2_OFY + ((long long)C2_IR2 * h_over_sz3)) >> 16);
+
+	{
+		// lain: frame interpolation follows the vertex in 3D
+		const short v[3] = { (short)VX(idx), (short)VY(idx), (short)VZ(idx) };
+		const int r[9] = { C2_R11, C2_R12, C2_R13, C2_R21, C2_R22, C2_R23, C2_R31, C2_R32, C2_R33 };
+		const int t[3] = { C2_TRX, C2_TRY, C2_TRZ };
+		LainInterp_NoteProjection(C2_SX2, C2_SY2, v, r, t, C2_H, C2_OFX, C2_OFY);
+	}
 
 #if USE_PGXP
 	// perform the same but in floating point

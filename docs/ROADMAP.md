@@ -8,7 +8,7 @@
 | Split | splat config for the executable (1,181 functions); round-trip build to a byte-identical executable |
 | Toolchain | GCC 2.8.1-psx + maspsx in Docker; `tools/progress.py` progress tracking |
 | PsyQ | Libraries identified by signature (PsyQ 4.3 + libpad 4.5) and excluded from decomp work |
-| Decompilation | Every game function has C; 308 of 321 match byte for byte; `.rodata` and emitted `.sdata` split per translation unit |
+| Decompilation | All 321 game functions match byte for byte; `.rodata` and emitted `.sdata` split per translation unit |
 | Naming | All game functions named except 6 empty stubs; all but 58 globals named |
 | Native client | Game C built natively (64-bit clean); PsyQ replaced (GPU, GTE, SPU/XA, MDEC, CD, pad, memory card); disc import with SHA-1 check; setup window and F1 menu |
 | Media | STR movies, XA voices, the 24-bit ending movie, disc 1/2 swaps through the game's own change-request screen |
@@ -20,20 +20,6 @@
 ## Open work
 
 ### Decompilation
-
-- **13 non-matching functions.** The build stays byte-identical by assembling their
-  original code. Diff counts and attempted fixes are in the comment above each one.
-
-  | File | Functions |
-  |---|---|
-  | `80013138.c` | `anim_decode_frame`, `site_move_cursor`, `site_handle_command` |
-  | `8002A344.c` | `node_open_anim_effect` |
-  | `80031378.c` | `movie_models_init`, `movie_models_update` |
-  | `80033820.c` | `start_menu_run`, `name_entry_draw_grid` |
-  | `800379C8.c` | `bg_curve_step` |
-  | `80039734.c` | `sskn_scene_run`, `gate_scene_run` |
-  | `8003D1B4.c` | `site_change_prompt_run` |
-  | `8003D6A8.c` | `polytan_scene_run` |
 
 - **`.data` / `.bss` as C.** Globals are still asm data.
 - **Remaining names.** 6 empty stub functions and 58 globals: 30 point inside other
@@ -56,9 +42,7 @@
   menus inside the site, Site B, the ending.
 - **Smooth motion gaps.** In-between frames need the game to wait in one `VSync(n)`
   call. Screens that pace themselves with two `VSync(0)` calls per frame (30 fps) are
-  not smoothed. The node map shows about 50-60 frames/s rather than a constant 60,
-  because the port spends 1-2 vblanks of each 5-vblank frame on its own work (VRAM
-  readback, texture uploads).
+  not smoothed.
 - **UI text translation** (menus, node keywords) in language packs. Low priority:
   most UI text in the original is English.
 - **More cheats** from the hidden-content research (debug modes, progress or site

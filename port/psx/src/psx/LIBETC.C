@@ -78,8 +78,9 @@ int VSync(int mode)
 	{
 		// lain: a wait of several vblanks (a 12/30 fps screen) can show
 		// in-between frames at each vblank (frame interpolation, PsyX_GPU.cpp).
+		// A vblank that passed while the game worked still gets its frame.
 		const int start = lastWait;
-		int shown = count;
+		int shown = start;
 		while (!g_skipSwapInterval && (count = PsyX_Sys_GetVBlankCount()) < target)
 		{
 			if (count != shown && mode > 1)

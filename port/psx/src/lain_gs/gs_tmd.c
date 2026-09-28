@@ -101,6 +101,10 @@ static u_int light_color(const SVECTOR *n, u_int rgb, int shade) {
 
 static int warned_ilen;
 
+/* lain: frame interpolation follows each polygon in 3D */
+void LainInterp_NotePacket(const void *prim, int nv, const short *v, const u_int *sxy,
+                           const int *r, const int *t, int h, int ofx, int ofy);
+
 void GsSortObject4(GsDOBJ2 *objp, GsOT *otp, int shift, u_int *scratch) {
     u_int a = objp->attribute;
     const u_int *obj;
@@ -131,6 +135,11 @@ void GsSortObject4(GsDOBJ2 *objp, GsOT *otp, int shift, u_int *scratch) {
     ot_n = 1 << otp->length;
     {
         const uint64_t key = gs_source_key(objp);
+        const u_int r0 = CFC2(0), r1 = CFC2(1), r2 = CFC2(2), r3 = CFC2(3), r4 = CFC2(4);
+        const int rot[9] = { (short)r0, (short)(r0 >> 16), (short)r1, (short)(r1 >> 16), (short)r2,
+                             (short)(r2 >> 16), (short)r3, (short)(r3 >> 16), (short)r4 };
+        const int tr[3] = { (int)CFC2(5), (int)CFC2(6), (int)CFC2(7) };
+        const int ofx = (int)CFC2(24), ofy = (int)CFC2(25), h = (u_short)CFC2(26);
 
     for (pi = 0; pi < nprim; pi++) {
         u_int hdr = pkt[0];
@@ -311,6 +320,15 @@ void GsSortObject4(GsDOBJ2 *objp, GsOT *otp, int shift, u_int *scratch) {
 
         ((P_TAG *)prim)->code = code;
         gs_link(entry, prim, getlen(prim));
+        {
+            short mv[4 * 3];
+            for (i = 0; i < nv; i++) {
+                mv[i * 3] = verts[vi[i]].vx;
+                mv[i * 3 + 1] = verts[vi[i]].vy;
+                mv[i * 3 + 2] = verts[vi[i]].vz;
+            }
+            LainInterp_NotePacket(prim, nv, mv, sxy, rot, tr, h, ofx, ofy);
+        }
 #if USE_PGXP && USE_EXTENDED_PRIM_POINTERS
         ((P_TAG *)prim)->pgxp_index = PGXP_GetIndex(1);
 #endif

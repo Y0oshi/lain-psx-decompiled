@@ -26,6 +26,7 @@ extern int gs_near_clip, gs_far_clip;
  * allocated next (index: the polygon in a TMD object). gs_set_tag(0, 0) stops. */
 uint64_t gs_source_key(const void *src);
 void gs_set_tag(uint64_t key, u_int index);
+void gs_set_tag_2d(uint64_t key); /* same for 2D sorts */
 
 /* Packet allocation (ring buffers, see gs_core.c). Never fails. */
 void *gs_alloc_packet(size_t size);

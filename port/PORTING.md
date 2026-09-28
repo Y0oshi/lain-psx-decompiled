@@ -194,7 +194,7 @@ global. Globals that hold pointers cannot keep the PS1 layout; they are host glo
 | Lain's movie/picture VLC decoder (`vlc_decode_frame`, `vlc_build_table`, in the EXE's library region) in C (`game/port_vlc.c`; reference: `tests/str_decode/lain_vlc.c`). Its code table `g_movie_vlc_table` comes from the player's EXE. | done |
 | `client/`: disc verification and import | done |
 | `client/`: setup window (resolution, fullscreen, language, voice) | done |
-| `game/`: 64-bit clean C, `NON_MATCHING` code paths | done |
+| `game/`: 64-bit clean C | done |
 | Global data from the player's EXE (see [Global data](#global-data)) | done |
 | Boot through the warning/logo screens, title menu, name entry and into Site A (3D node map, Lain animation, XA audio), node menus | done |
 | Media: sound-file player (XA, slideshow, level meter), in-game STR movies (15-bit), the 24-bit ending movie, disc 1/2 swaps through the game's "DISC Change Request" screen | done |
@@ -375,15 +375,26 @@ frame at every vblank:
 3. Primitives are matched through tags the port's libgs gives each packet
    (`LainGs_PacketTag`: a hash of the TMD object and polygon, or of the sprite/line
    struct, plus how often it was sorted this frame); untagged primitives match by
-   address. Primitives that appeared, vanished or moved more than 96 pixels are drawn
-   where they are.
+   address.
+4. 3D geometry moves in 3D. libgs records each TMD polygon's model vertices and GTE
+   transform; for other geometry the GTE emulation records every projection by screen
+   position. A vertex turns about the axis of the motion between the two transforms
+   and is then projected, so rotating rings and nodes keep their shape. Geometry the
+   game moves itself (the same corner under a new model position) is blended in 3D
+   before the projection.
+5. 2D primitives slide in a straight line. A sprite whose image changed (Lain's
+   animation), a texture that was re-uploaded, and anything that moved more than 96
+   pixels are drawn where they are.
 
-The real frame is still presented unchanged at the end of the wait, and the screen
-framebuffer the game reads back into VRAM is never touched. Overlays (subtitles, F1
-menu) are drawn on in-between frames too. `LAIN_SCREENSHOT_INTERP=1` also saves the
-in-between frames before each screenshot frame. Code: `LainInterp_*` in
-`psx/src/gpu/PsyX_GPU.cpp`, `GR_Interp*` in `psx/src/render/PsyX_render.cpp`, and the
-wait loop in `VSync` (`LIBETC.C`).
+With smooth motion on, 3D vertices of the real frames are also drawn at their exact
+projected positions rather than rounded to whole pixels, so real and in-between
+frames lie on one path. The screen framebuffer the game reads back into VRAM is never
+touched. Overlays (subtitles, F1 menu) are drawn on in-between frames too.
+`LAIN_SCREENSHOT_INTERP=1` also saves the in-between frames before each screenshot
+frame. Code: `LainInterp_*` in `psx/src/gpu/PsyX_GPU.cpp`, `GR_Interp*` in
+`psx/src/render/PsyX_render.cpp`, the GTE hook in `psx/src/gte/PsyX_GTE.cpp`,
+`GsSortObject4` in `psx/src/lain_gs/gs_tmd.c`, and the wait loop in `VSync`
+(`LIBETC.C`).
 
 ### Timing
 

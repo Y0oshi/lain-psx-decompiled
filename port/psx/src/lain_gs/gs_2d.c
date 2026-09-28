@@ -49,7 +49,7 @@ static void sort_sprt(GsSPRITE *sp, GsOT *otp, u_short pri, int x, int y) {
 }
 
 void GsSortFastSprite(GsSPRITE *sp, GsOT *otp, u_short pri) {
-    gs_set_tag(gs_source_key(sp), 0);
+    gs_set_tag_2d(gs_source_key(sp));
     if (ATTR_HIDDEN(sp->attribute) || sp->w == 0 || sp->h == 0) {
         return;
     }
@@ -76,7 +76,7 @@ void GsSortSprite(GsSPRITE *sp, GsOT *otp, u_short pri) {
     int u0, u1, v0, v1;
     int wm1, hm1;
 
-    gs_set_tag(gs_source_key(sp), 0);
+    gs_set_tag_2d(gs_source_key(sp));
 
     if (ATTR_HIDDEN(a) || sp->w == 0 || sp->h == 0) {
         return;
@@ -160,7 +160,7 @@ void GsSortLine(GsLINE *lp, GsOT *otp, u_short pri) {
     GsOT_TAG *entry;
     LINE_F2 *l;
 
-    gs_set_tag(gs_source_key(lp), 0);
+    gs_set_tag_2d(gs_source_key(lp));
 
     if (ATTR_HIDDEN(lp->attribute)) {
         return;
@@ -180,7 +180,7 @@ void GsSortGLine(GsGLINE *lp, GsOT *otp, u_short pri) {
     GsOT_TAG *entry;
     LINE_G2 *l;
 
-    gs_set_tag(gs_source_key(lp), 0);
+    gs_set_tag_2d(gs_source_key(lp));
 
     if (ATTR_HIDDEN(lp->attribute)) {
         return;
@@ -213,7 +213,7 @@ void GsSortPoly(void *prim, GsOT *otp, u_short pri) {
     size_t size;
     void *p;
 
-    gs_set_tag(gs_source_key(prim), 0);
+    gs_set_tag_2d(gs_source_key(prim));
 
     if ((code & 0xE0) != 0x20) {
         return; /* not a polygon */

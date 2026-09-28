@@ -768,6 +768,7 @@ typedef struct
 	GLint texelSizeLoc;
 	GLint texLoc;
 	GLint lutLoc;
+	GLint stpPassLoc; // lain
 #endif
 } PSXGPU_Shader;
 
@@ -889,8 +890,11 @@ GLint u_texelSizeLoc;
 	"		return t;\n"\
 	"	}\n"\
 	"	uniform int bilinearFilter;\n"\
+	"	uniform int stpPass; // lain: 1 = texels without STP only, 2 = texels with STP only\n"\
 	"	void main() {\n"\
 	"		vec4 color = (bilinearFilter > 0) ? bilinearTextureSample(v_texcoord.xy) : nearestTextureSample(v_texcoord.xy);\n"\
+	"		if (stpPass == 1 && color.a < 0.75) { discard; }\n"\
+	"		if (stpPass == 2 && color.a >= 0.75) { discard; }\n"\
 	"		fragColor = dither(color * v_color);\n"\
 	"	}\n"
 	
@@ -925,14 +929,14 @@ const char* gpu_shader_32_rgba =
 		"	gl_Position = fragPosition;\n"
 #else
 #	define GTE_PERSPECTIVE_CORRECTION \
-		"	gl_Position = Projection * vec4(a_position.xy, 0.0, 1.0);\n"
+		"	gl_Position = Projection * vec4(a_position.xy + a_extra.zw / 128.0, 0.0, 1.0);\n"
 #endif
 
 #define GTE_VERTEX_SHADER \
 	"	attribute vec4 a_position;\n"\
 	"	attribute vec4 a_texcoord; // uv, color multiplier, dither\n"\
 	"	attribute vec4 a_color;\n"\
-	"	attribute vec4 a_extra; // texcoord.xy ofs, unused.xy\n"\
+	"	attribute vec4 a_extra; // texcoord.xy ofs, position.xy fraction (lain)\n"\
 	"	attribute vec4 a_zw;\n"\
 	"	uniform mat4 Projection;\n"\
 	"	uniform mat4 Projection3D;\n"\
@@ -1195,6 +1199,7 @@ void GR_CompilePSXShader(PSXGPU_Shader* sh, const char* source)
 
 #if USE_OPENGL
 	sh->bilinearFilterLoc = glGetUniformLocation(sh->shader, "bilinearFilter");
+	sh->stpPassLoc = glGetUniformLocation(sh->shader, "stpPass");
 	sh->projectionLoc = glGetUniformLocation(sh->shader, "Projection");
 	sh->texelSizeLoc = glGetUniformLocation(sh->shader, "texelSize");
 	sh->texLoc = glGetUniformLocation(sh->shader, "s_texture");
@@ -1510,6 +1515,15 @@ void GR_SetShader(const ShaderID shader)
 }
 
 
+// lain: STP pass uniform of the shader GR_SetTexture last selected
+static GLint s_stpPassLoc = -1;
+
+void GR_SetStpPass(int pass)
+{
+	if (s_stpPassLoc != -1)
+		glUniform1i(s_stpPassLoc, pass);
+}
+
 void GR_SetTexture(TextureID texture, TexFormat texFormat)
 {
 	GLint texLoc = 0;
@@ -1520,6 +1534,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	case TF_4_BIT:
 		GR_SetShader(g_gpu_shader_4.shader);
 		bilinearFilterLoc = g_gpu_shader_4.bilinearFilterLoc;
+		s_stpPassLoc = g_gpu_shader_4.stpPassLoc;
 		u_projectionLoc = g_gpu_shader_4.projectionLoc;
 		u_projection3DLoc = g_gpu_shader_4.projection3DLoc;
 		texLoc = g_gpu_shader_4.texLoc;
@@ -1529,6 +1544,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	case TF_8_BIT:
 		GR_SetShader(g_gpu_shader_8.shader);
 		bilinearFilterLoc = g_gpu_shader_8.bilinearFilterLoc;
+		s_stpPassLoc = g_gpu_shader_8.stpPassLoc;
 		u_projectionLoc = g_gpu_shader_8.projectionLoc;
 		u_projection3DLoc = g_gpu_shader_8.projection3DLoc;
 		texLoc = g_gpu_shader_8.texLoc;
@@ -1538,6 +1554,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	case TF_16_BIT:
 		GR_SetShader(g_gpu_shader_16.shader);
 		bilinearFilterLoc = g_gpu_shader_16.bilinearFilterLoc;
+		s_stpPassLoc = g_gpu_shader_16.stpPassLoc;
 		u_projectionLoc = g_gpu_shader_16.projectionLoc;
 		u_projection3DLoc = g_gpu_shader_16.projection3DLoc;
 		texLoc = g_gpu_shader_16.texLoc;
@@ -1551,6 +1568,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projection3DLoc = g_gpu_shader_32_rgba.projection3DLoc;
 		texLoc = g_gpu_shader_32_rgba.texLoc;
 		lutLoc = -1;
+		s_stpPassLoc = -1;
 		u_texelSizeLoc = g_gpu_shader_32_rgba.texelSizeLoc;
 		break;
 	}
@@ -1954,9 +1972,12 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 #endif
 }
 
+extern "C" void LainInterp_NoteUpload(int x, int y, int w, int h); // lain
+
 void GR_CopyVRAM(unsigned short* src, int x, int y, int w, int h, int dst_x, int dst_y)
 {
 	vram_need_update = 1;
+	LainInterp_NoteUpload(dst_x, dst_y, w, h); // lain
 
 	int stride = w;
 
