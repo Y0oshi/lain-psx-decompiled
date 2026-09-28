@@ -199,6 +199,13 @@ typedef struct {
 /* PsyQ libgpu primitive-length setter (byte 3 of the tag word). */
 #define setlen(p, n) (((u8 *)(p))[3] = (n))
 
+/* PsyQ libgpu: texture coordinates of a w x h rectangle at (u0, v0). */
+#define setUVWH(p, _u0, _v0, _w, _h) \
+    (p)->u0 = (_u0), (p)->v0 = (_v0), \
+    (p)->u1 = (_u0) + (_w), (p)->v1 = (_v0), \
+    (p)->u2 = (_u0), (p)->v2 = (_v0) + (_h), \
+    (p)->u3 = (_u0) + (_w), (p)->v3 = (_v0) + (_h)
+
 /* 0x4C-byte glyph object of the name-entry screen, drawn by sprite_draw_rotated
  * (only the sprite-like part at 0x28 is set up here). */
 typedef struct {
@@ -417,7 +424,6 @@ TIM_IMAGE *ReadTIM(TIM_IMAGE *timimg);
 
 
 
-#ifdef NON_MATCHING
 /* Types shared with src/game/80031378.c. */
 
 
@@ -445,7 +451,7 @@ extern char g_str_no[];        /* .sdata "No" */
 s16 font_render_string(char *text, s32 x, s32 y, s32 arg3, s32 arg4);
 void sprite_draw(Glyph *g, GsOT *ot, u16 pri);
 void msgbox_draw(s32 msg);
-void site_reload(s32 arg);
+void site_reload(void);
 void bg_curves_init(void);
 void bg_curves_update(void);
 void bg_curves_free(void);
@@ -505,20 +511,9 @@ void GsDrawOt(GsOT *ot);
  * States 1-12 also draw the two background quads (start_menu_update_panels, which also
  * streams a TIM into VRAM a step per frame).
  * On exit VRAM is cleared, the text strip restored and the buffers freed.
- *
- * NON_MATCHING: 35 of 1825 instructions differ after alignment (2.8.1-psx);
- * check.sh reports 184 because the missing instruction shifts every later
- * relocation. Remaining differences:
- *  - case 0: the delay slot of the sprites[0..1] loop branch is filled from
- *    the fall-through (li a2,1) instead of the loop head (move a0,s0), so
- *    the function is one instruction short and everything after shifts.
- *    Cause: a (use (reg)) that combine leaves after the loop for the
- *    idx[0] sign-extension temp (idx[0] is CSE'd into the idx[0]++).
- *  - case 0: which / idx[] temp in a0/v1 swapped.
- *  - every "t % 16" / "t % 64 / 4" angle: quotient in v0 instead of v1
- *    (local-alloc ties the shift chain; the original doesn't).
- *  - memory-card sub-state 3: li a0,0x10 duplicated in the jal delay slot.
- * decomp-permuter (20 min) found nothing better.
+ * k and r are scratch variables reused across states (k: which sequence
+ * advanced in state 0, r: angle step and memory card result); separate
+ * locals change the register allocation.
  */
 void start_menu_run(void) {
     s16 idx[2];            /* 0x18: position in each frame sequence */
@@ -538,7 +533,6 @@ void start_menu_run(void) {
     s32 state;
     s32 sub;
     s32 wait;
-    s32 which;
     s32 frame;
     s32 choice;
     s32 busy;
@@ -673,18 +667,18 @@ void start_menu_run(void) {
             GsSortFastSprite(&sprites[13], &g_ot_2d[g_frame_buffer_index], 1);
             timers[0][idx[0]]--;
             timers[1][idx[1]]--;
-            which = 0;
+            k = 0;
             if (timers[0][idx[0]] == 0) {
                 idx[0]++;
-                which = 1;
+                k = 1;
             }
             if (timers[1][idx[1]] == 0) {
                 idx[1]++;
-                if (which == 0) {
-                    which = 2;
+                if (k == 0) {
+                    k = 2;
                 }
             }
-            switch (which) {
+            switch (k) {
             case 0:
                 frame = order[0][0];
                 break;
@@ -704,7 +698,8 @@ void start_menu_run(void) {
             GsSortFastSprite(&sprites[2], &g_ot_2d[g_frame_buffer_index], 1);
             sprite_draw(&glyphs[0], &g_ot_2d[g_frame_buffer_index], 1);
             sprite_draw(&glyphs[1], &g_ot_2d[g_frame_buffer_index], 1);
-            glyphs[3].rotZ = (t % 16 * 256 + 256) % 4096;
+            r = t % 16;
+            glyphs[3].rotZ = (r * 256 + 256) % 4096;
             sprite_draw_rotated(&glyphs[3], &g_ot_2d[g_frame_buffer_index], 1);
             sprite_draw_rotated(&glyphs[2], &g_ot_2d[g_frame_buffer_index], 1);
             t++;
@@ -739,7 +734,8 @@ void start_menu_run(void) {
             glyphs[1].b = shade;
             sprite_draw(&glyphs[0], &g_ot_2d[g_frame_buffer_index], 1);
             sprite_draw(&glyphs[1], &g_ot_2d[g_frame_buffer_index], 1);
-            glyphs[3].rotZ = (t % 16 * 256 + 256) % 4096;
+            r = t % 16;
+            glyphs[3].rotZ = (r * 256 + 256) % 4096;
             glyphs[3].x = 0x98;
             glyphs[3].y = t * -54 / 32 + 0xAC;
             sprite_draw_rotated(&glyphs[3], &g_ot_2d[g_frame_buffer_index], 1);
@@ -795,7 +791,8 @@ void start_menu_run(void) {
             DrawSync(0);
             gfx_frame_begin();
             GsSortFastSprite(&sprites[13], &g_ot_2d[g_frame_buffer_index], 1);
-            glyphs[3].rotZ = (t % 64 / 4 * 256 + 256) % 4096;
+            r = t % 64 / 4;
+            glyphs[3].rotZ = (r * 256 + 256) % 4096;
             sprite_draw_rotated(&glyphs[3], &g_ot_2d[g_frame_buffer_index], 1);
             if (choice == 0) {
                 sprites[14].cx = 0x160;
@@ -839,7 +836,8 @@ void start_menu_run(void) {
             glyphs[3].g = fade;
             glyphs[3].b = fade;
             GsSortFastSprite(&sprites[13], &g_ot_2d[g_frame_buffer_index], 1);
-            glyphs[3].rotZ = (t % 64 / 4 * 256 + 256) % 4096;
+            r = t % 64 / 4;
+            glyphs[3].rotZ = (r * 256 + 256) % 4096;
             sprite_draw_rotated(&glyphs[3], &g_ot_2d[g_frame_buffer_index], 1);
             GsSortFastSprite(&sprites[14], &g_ot_2d[g_frame_buffer_index], 1);
             sprites[15].x = i * -91 / 32 + 106;
@@ -1014,7 +1012,7 @@ void start_menu_run(void) {
                 break;
             case 3:
                 if (--wait == 0) {
-                    site_reload(0x10);
+                    site_reload();
                     heap_free(buf);
                     goto done;
                 }
@@ -1078,7 +1076,8 @@ void start_menu_run(void) {
             glyphs[3].g = fade;
             glyphs[3].b = fade;
             GsSortFastSprite(&sprites[13], &g_ot_2d[g_frame_buffer_index], 1);
-            glyphs[3].rotZ = (t % 64 / 4 * 256 + 256) % 4096;
+            r = t % 64 / 4;
+            glyphs[3].rotZ = (r * 256 + 256) % 4096;
             sprite_draw_rotated(&glyphs[3], &g_ot_2d[g_frame_buffer_index], 1);
             GsSortFastSprite(&sprites[14], &g_ot_2d[g_frame_buffer_index], 1);
             sprites[15].x = i * 91 / 32 + 15;
@@ -1110,7 +1109,8 @@ void start_menu_run(void) {
             glyphs[3].g = fade;
             glyphs[3].b = fade;
             GsSortFastSprite(&sprites[13], &g_ot_2d[g_frame_buffer_index], 1);
-            glyphs[3].rotZ = (t % 64 / 4 * 256 + 256) % 4096;
+            r = t % 64 / 4;
+            glyphs[3].rotZ = (r * 256 + 256) % 4096;
             sprite_draw_rotated(&glyphs[3], &g_ot_2d[g_frame_buffer_index], 1);
             sprites[14].x = i * 71 / 32 + 83;
             sprites[14].y = i * -54 / 32 + 73;
@@ -1151,7 +1151,8 @@ void start_menu_run(void) {
             glyphs[3].g = fade;
             glyphs[3].b = fade;
             GsSortFastSprite(&sprites[13], &g_ot_2d[g_frame_buffer_index], 1);
-            glyphs[3].rotZ = (t % 64 / 4 * 256 + 256) % 4096;
+            r = t % 64 / 4;
+            glyphs[3].rotZ = (r * 256 + 256) % 4096;
             sprite_draw_rotated(&glyphs[3], &g_ot_2d[g_frame_buffer_index], 1);
             sprites[14].x = i * -71 / 32 + 154;
             sprites[14].y = i * 54 / 32 + 19;
@@ -1197,10 +1198,6 @@ done:
     heap_free(g_menu_scroll_tim);
     heap_free(save);
 }
-#else
-INCLUDE_RODATA("asm/nonmatchings/game/80033820", start_menu_flicker_order_init);
-INCLUDE_ASM("asm/nonmatchings/game/80033820", start_menu_run);
-#endif
 
 extern s16 g_name_entry_mesh_x[][10]; /* mesh x coordinates */
 extern u8 g_name_entry_mesh_y[][10];  /* mesh y coordinates */
@@ -1361,16 +1358,6 @@ void name_entry_init(MenuWork *w) {
     w->count = 0;
 }
 
-#ifdef NON_MATCHING
-/* 4 diffs: scheduling of the cell address vs. the u coordinate computation.
- * sched1's "birthing" rule gives an insn that sets a single-set pseudo
- * LAUNCH priority (0x7f000001 in -dS). `p` has one set, so its address chain
- * is scheduled first in reverse and ends up after the u chain; the original
- * order needs p set twice (REG_N_SETS > 1) with neither set optimised away.
- * Tried: reordering p/u/u1, s32/u8/u32 for u/u1, no p variable, p set in each tpage
- * branch (28-40), dead extra sets of p (removed, still 4), `p = w->grid; p += idx`,
- * `u += 47` / `v += 31` reusing u and v, r reused for u (4-40).
- * decomp-permuter (50 min) found nothing better. */
 /* Lay out and draw the visible 9x9 window of the character table around the cursor. */
 void name_entry_draw_grid(MenuWork *w) {
     POLY_FT4 *p;
@@ -1380,9 +1367,6 @@ void name_entry_draw_grid(MenuWork *w) {
     s32 r;
     u32 col;
     s32 idx;
-    s16 u;
-    s16 u1;
-    s32 v;
 
     for (i = 0; i < 9; i++) {
         row = w->row - 3 + i;
@@ -1408,17 +1392,8 @@ void name_entry_draw_grid(MenuWork *w) {
                 w->grid[idx].tpage = 5;
                 r -= 10;
             }
-            u = (4 - r) * 48;
             p = &w->grid[idx];
-            u1 = u + 47;
-            p->u0 = u;
-            p->u2 = u;
-            p->v0 = col * 32;
-            p->v1 = col * 32;
-            p->u1 = u1;
-            p->v2 = col * 32 + 31;
-            p->u3 = u1;
-            p->v3 = col * 32 + 31;
+            setUVWH(p, (4 - r) * 48, col * 32, 47, 31);
             if (p->x0 > 0 && p->x1 > 0 && p->x2 > 0 && p->x3 > 0) {
                 if (i == 3 && (j == 3 || j == 4)) {
                     if (j == 4) {
@@ -1440,9 +1415,6 @@ void name_entry_draw_grid(MenuWork *w) {
         }
     }
 }
-#else
-INCLUDE_ASM("asm/nonmatchings/game/80033820", name_entry_draw_grid);
-#endif
 
 /* Draw the entered characters (from a 15-column font sheet) and the cursor sprite. */
 void name_entry_draw_chars(MenuWork *w) {

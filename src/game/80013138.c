@@ -366,17 +366,10 @@ s32 DecDCToutSync(s32 mode);
 s32 vlc_decode_frame(u32 *bs, u32 *buf);
 void anim_apply_mask(u32 *dst, s32 x, s32 stride, s32 rows);
 
-#ifdef NON_MATCHING
-/* 10 diffs, all in the scheduling of the statistics block at the end.
- * g_vsync_counter must be volatile to keep `x = 0` before DecDCTin. The
- * original loads size.w before the g_vsync_counter read and orders the loads
- * of g_anim_entry/g_anim_decode_count after the info->h store. That looks as if
- * `size` were non-struct stack scalars, which conflict differently with the stores
- * through `info`. Tried: all orders of the last 5-6 statements, and info as an s32 array
- * (11-15 diffs). decomp-permuter (50 min) lowers its own score with `h = size.w;
- * info->w = h;` (reusing h), but that is 13 by check.sh. */
 /* Decodes the current archive entry (an MDEC-compressed picture) to VRAM in
- * 16-pixel strips and records timing statistics. Returns 1 on success. */
+ * 16-pixel strips and records timing statistics. Returns 1 on success.
+ * Matching: param is read through an s32 pointer (not a struct field), so it
+ * may alias g_anim_decode_count and stays ahead of that store; w holds it. */
 s32 anim_decode_frame(ImageInfo *info) {
     RECT rect;
     Size32 size;
@@ -387,7 +380,10 @@ s32 anim_decode_frame(ImageInfo *info) {
     s32 t0, t1, t2;
     s32 x;
     s32 h;
+    s32 w;
     s32 words;
+    s32 h2;
+    s32 *param;
     s16 *e0;
     u16 *e1;
 
@@ -434,11 +430,15 @@ s32 anim_decode_frame(ImageInfo *info) {
         t0 = t1 - t0;
         t1 = t2 - t1;
         t2 = g_vsync_counter - t2;
-        g_anim_decode_vblanks += t0 + t1 + t2;
+        w = size.w;
+        h2 = size.h;
+        info->h = h2;
+        info->w = w;
+        param = &g_anim_entry->param;
+        w = *param;
         g_anim_decode_count++;
-        info->h = size.h;
-        info->w = size.w;
-        info->param = g_anim_entry->param;
+        info->param = w;
+        g_anim_decode_vblanks += t0 + t1 + t2;
         if (t0 == 3 && g_anim_max_frame_size < dataSize) {
             g_anim_max_frame_size = dataSize;
         }
@@ -455,9 +455,6 @@ s32 anim_decode_frame(ImageInfo *info) {
     rect.h = 480;
     return ClearImage(&rect, 255, 255, 255);
 }
-#else
-INCLUDE_ASM("asm/nonmatchings/game/80013138", anim_decode_frame);
-#endif
 
 extern u8 g_anim_vlc_table[];
 void DecDCTReset(s32 mode);
@@ -994,9 +991,6 @@ extern s32 g_site_rotation;   /* column rotation of the map */
 extern s32 g_site_rotation __attribute__((section(".data")));
 void text_window_run(s32);
 
-#ifdef NON_MATCHING
-/* 75 diffs: almost all are col/row landing in s3/s2 instead of s2/s3, plus the
- * block order of one site_find_nearest_node(0, 5) exit. */
 /* Moves the map cursor by (dx, dy). Returns 1 when the move leaves the
  * visible page (g_pad_command says which way), 0 otherwise. */
 s32 site_move_cursor(s32 dx, s32 dy) {
@@ -1054,8 +1048,10 @@ s32 site_move_cursor(s32 dx, s32 dy) {
     row = (s16)g_site_cursor_row + dy;
     if (col < 0) {
         col = 7;
-    } else if (col >= 8) {
-        col = 0;
+    } else {
+        while (col >= 8) {
+            col = 0;
+        }
     }
     if (row < 0) {
         row = 0;
@@ -1131,6 +1127,7 @@ s32 site_move_cursor(s32 dx, s32 dy) {
                         g_site_target_col = col;
                         g_site_target_row = row;
                         if (site_find_nearest_node(0, 5) != 0) {
+                        use_target:
                             col = g_site_target_col;
                             row = (s16)g_site_target_row;
                         } else {
@@ -1140,8 +1137,7 @@ s32 site_move_cursor(s32 dx, s32 dy) {
                     }
                 }
             } else {
-                col = g_site_target_col;
-                row = (s16)g_site_target_row;
+                goto use_target;
             }
         }
         r = row / 3;
@@ -1161,9 +1157,6 @@ s32 site_move_cursor(s32 dx, s32 dy) {
     text_window_run(0);
     return 0;
 }
-#else
-INCLUDE_ASM("asm/nonmatchings/game/80013138", site_move_cursor);
-#endif
 
 
 /* Moves the map cursor: highlights the current cell and, if `select`, jumps
@@ -1223,20 +1216,6 @@ void snd_play_sfx(s32);
 s16 lain_anim_load_select(s32);
 s16 lain_anim_load_save(void);
 
-#ifdef NON_MATCHING
-/* 94 diffs (jump tables live in .rodata): mostly delay-slot filling. Everything before
- * case 10 matches. In the case 10/11/17 sub-switches, reorg fills the `beq` delay slot from
- * the target (`li v0,9`), while the original steals `a0 = 0` from the `goto done`
- * fall-through. The RTL before reorg (the .sched2 dump) has the same block layout as the
- * original, so the difference is in the jump/label shape reorg sees.
- * More precisely: the original leaves the final `jal text_window_run` delay slot empty
- * and keeps `a0 = 0` as a separate insn before it, which every `goto done`/`break` path
- * then steals into its own branch/jump delay slot; here fill_simple_delay_slots moves
- * `a0 = 0` into the jal slot first, so there is nothing to steal and the `beq`s take
- * the case bodies' `li v0,N` instead. A duplicated `text_window_run(0); return; done:
- * text_window_run(0);` tail and a `do {} while (0)` after `done:` don't change anything.
- * decomp-permuter's best (59) sets g_site_return_state before the case-10 sub-switch, which
- * changes behaviour on the default path, so it isn't usable. */
 /* Handles the pending map command in g_pad_command (cursor moves, page turns,
  * menu toggles), re-dispatching while a move spills onto another page. */
 void site_handle_command(void) {
@@ -1429,15 +1408,18 @@ dispatch:
             g_site_return_state = g_site_state;
             switch (g_site_state) {
             case 0:
-                g_site_state = 3;
+                next = 3;
                 break;
             case 1:
-                g_site_state = 22;
+                next = 22;
                 break;
             case 2:
-                g_site_state = 23;
+                next = 23;
                 break;
+            default:
+                goto done;
             }
+            g_site_state = next;
         } else if (g_stat_harumage < 100) {
             g_stat_harumage++;
         }
@@ -1448,27 +1430,28 @@ dispatch:
         g_site_return_state = g_site_state;
         switch (g_site_state) {
         case 0:
-            g_site_state = 4;
+            next = 4;
             break;
         case 1:
-            g_site_state = 24;
+            next = 24;
             break;
         case 2:
-            g_site_state = 25;
+            next = 25;
             break;
+        default:
+            goto done;
         }
+        g_site_state = next;
         break;
     case 14:
         g_site_return_state = g_site_state;
         g_site_state = 5;
-        break;
+        text_window_run(0);
+        return;
     }
 done:
     text_window_run(0);
 }
-#else
-INCLUDE_ASM("asm/nonmatchings/game/80013138", site_handle_command);
-#endif
 
 /* Resets the slide animation and sets the two digit sprites' UVs from g_site_level + 1. */
 void jump_menu_init(void) {

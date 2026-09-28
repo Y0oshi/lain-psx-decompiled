@@ -1,7 +1,8 @@
 # Matching guide
 
 How to turn an `INCLUDE_ASM` function into C that compiles to identical
-instructions. [DECOMPILATION.md](DECOMPILATION.md) covers the setup and toolchain.
+instructions. Every game function is matched; the same techniques apply when editing
+matched code. [DECOMPILATION.md](DECOMPILATION.md) covers the setup and toolchain.
 
 All commands run inside the container, through `tools/docker.sh <cmd>`.
 
@@ -201,12 +202,12 @@ The comment states the diff count and what has been tried.
 
 ## decomp-permuter
 
-For a `NON_MATCHING` function stuck on register allocation or scheduling,
+For a function stuck on register allocation or scheduling,
 [decomp-permuter](https://github.com/simonlindholm/decomp-permuter) (in the image at
 `/opt/permuter`) tries random source rewrites and keeps the ones that score better:
 
-    tools/docker.sh tools/permute.sh name_entry_draw_grid src/game/80033820.c
-    tools/docker.sh env PERMUTE_TIME=45m PERMUTE_JOBS=4 tools/permute.sh name_entry_draw_grid src/game/80033820.c
+    tools/docker.sh tools/permute.sh <func> src/game/<file>.c
+    tools/docker.sh env PERMUTE_TIME=45m PERMUTE_JOBS=4 tools/permute.sh <func> src/game/<file>.c
 
 `tools/permute_import.py` sets up `build/permuter/<func>/`:
 

@@ -188,8 +188,7 @@ Game code only (PsyQ libraries excluded). `tools/progress.py --files` prints liv
 | PsyQ libraries identified | done: PsyQ 4.3 + libpad 4.5, 651 symbols |
 | `.rodata` per translation unit | done |
 | Emitted `.sdata` per translation unit | done |
-| Game functions as matching C | 308 / 321 (85.8% of bytes) |
-| Functionally complete C, not yet byte-exact | 13 functions (14.2% of bytes), listed in [ROADMAP.md](ROADMAP.md) |
+| Game functions as matching C | 321 / 321 (100% of bytes) |
 | Functions with no C | 0 |
 | `.data` / `.bss` as C | not started (globals are still asm data) |
 

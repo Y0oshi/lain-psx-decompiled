@@ -17,27 +17,21 @@ ever committed.
 
 ## Decompilation
 
-Setup is in the [README](README.md#building-the-decompilation). Then:
+Setup is in the [README](README.md#building-the-decompilation). All 321 game functions
+already compile to the original bytes, so the open work is readability: names, types
+and comments, and moving `.data` / `.bss` globals from asm to C (see
+[docs/ROADMAP.md](docs/ROADMAP.md)).
 
-1. Pick a function under `#ifdef NON_MATCHING` in `src/game/`
-   (`grep -rn "ifdef NON_MATCHING" src/game`; `tools/progress.py --files` shows the
-   totals per file).
-2. Edit its C, then compare it with the original:
+Every change has to keep the build matching. Check an edited function, then run the
+full build:
 
-   ```sh
-   tools/docker.sh tools/check.sh <function> src/game/<file>.c   # 0 = match
-   tools/docker.sh tools/fdiff.sh <function> src/game/<file>.c   # side-by-side diff
-   ```
-3. When it matches, move the C out of `#ifdef NON_MATCHING` so it replaces the
-   `INCLUDE_ASM`, and run the full build.
-4. Refresh the progress report:
+```sh
+tools/docker.sh tools/check.sh <function> src/game/<file>.c   # 0 = match
+tools/docker.sh tools/fdiff.sh <function> src/game/<file>.c   # side-by-side diff
+tools/docker.sh make                                          # must print OK
+```
 
-   ```sh
-   tools/docker.sh make report
-   cp build/report.json progress/SLPS_016.03_report.json
-   ```
-
-Techniques, compiler quirks and the permuter are covered in
+Compiler quirks and techniques for keeping code matching are in
 [docs/MATCHING.md](docs/MATCHING.md).
 
 ### Naming

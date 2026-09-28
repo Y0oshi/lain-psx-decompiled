@@ -366,15 +366,9 @@ static inline void UploadTim(s32 x, s32 y) {
     MoveImage(ICON_RECT, pos[k][0] + 0x120, pos[k][1] | 0x100)
 
 
-#ifdef NON_MATCHING
-/* 101 diffs: register allocation in the TIM loaders and the countdown loops
- * (the original keeps the sprite offset as a separate induction variable).
- * decomp-permuter (20 min) only found 97 with a split `spr[k].x = 0x87;
- * spr[k].x += (count - j) * 8`, not applied.
- * Also needs its own .rodata (switch jump tables). */
 /* Yes/No confirmation dialog: fades in, lets the player pick with the d-pad
  * and confirm, runs a short countdown on "yes" and fades out. Returns 1 when
- * "yes" was chosen. */
+ * "yes" was chosen. `fade` doubles as the CD load id in the TIM loaders. */
 s32 sskn_scene_run(void) {
     TIM_IMAGE tim;
     RECT rect;
@@ -385,15 +379,14 @@ s32 sskn_scene_run(void) {
     s32 result;
     void *packed;
     u8 *data;
-    s32 id;
     s32 i;
     s32 j;
-    s32 n;
     s32 k;
     s32 rot;
     s32 state;
     s32 fade;
     s32 count;
+    GsOT *ot;
 
     rect.x = 0;
     rect.y = 0;
@@ -402,8 +395,8 @@ s32 sskn_scene_run(void) {
     ClearImage(&rect, 0, 0, 0);
     packed = heap_alloc(g_bin_file_table[10].size);
     if (packed != NULL) {
-        id = cd_load_archive_entry(3, 10, g_bin_file_table, packed);
-        while (cd_poll_load(id) == 0) {
+        fade = cd_load_archive_entry(3, 10, g_bin_file_table, packed);
+        while (cd_poll_load(fade) == 0) {
         }
         data = lz_decompress(packed, g_bin_file_table[10].size);
         heap_free(packed);
@@ -419,8 +412,8 @@ s32 sskn_scene_run(void) {
         heap_free(data);
 
         packed = heap_alloc(g_bin_file_table[11].size);
-        id = cd_load_archive_entry(3, 11, g_bin_file_table, packed);
-        while (cd_poll_load(id) == 0) {
+        fade = cd_load_archive_entry(3, 11, g_bin_file_table, packed);
+        while (cd_poll_load(fade) == 0) {
         }
         data = lz_decompress(packed, g_bin_file_table[11].size);
         heap_free(packed);
@@ -436,8 +429,8 @@ s32 sskn_scene_run(void) {
         heap_free(data);
 
         packed = heap_alloc(g_bin_file_table[12].size);
-        id = cd_load_archive_entry(3, 12, g_bin_file_table, packed);
-        while (cd_poll_load(id) == 0) {
+        fade = cd_load_archive_entry(3, 12, g_bin_file_table, packed);
+        while (cd_poll_load(fade) == 0) {
         }
         data = lz_decompress(packed, g_bin_file_table[12].size);
         heap_free(packed);
@@ -482,6 +475,7 @@ s32 sskn_scene_run(void) {
         icons[i].tpage = g_sskn_sprite_defs[i + 19].tpage;
         icons[i].u = g_sskn_sprite_defs[i + 19].u;
         icons[i].v = g_sskn_sprite_defs[i + 19].v;
+        icons[i].clut = (g_sskn_sprite_defs[i + 19].cy << 6) | ((g_sskn_sprite_defs[i + 19].cx >> 4) & 0x3F);
         icons[i].r = 0;
         icons[i].g = 0;
         icons[i].b = 0;
@@ -490,7 +484,6 @@ s32 sskn_scene_run(void) {
         icons[i].rotX = 0;
         icons[i].rotY = 0;
         icons[i].rotZ = 0;
-        icons[i].clut = (g_sskn_sprite_defs[i + 19].cy << 6) | ((g_sskn_sprite_defs[i + 19].cx >> 4) & 0x3F);
     }
     icons[1].attr = 0x40000000;
     rot = 0;
@@ -598,13 +591,14 @@ s32 sskn_scene_run(void) {
                     spr[fade + 13].y = 0xC4;
                     GsSortFastSprite(&spr[fade + 13], &g_ot_2d[g_frame_buffer_index], 0);
                 }
-                for (j = 0, n = 5, k = 18; n > 0; j++, n--, k--) {
+                for (i = 5, j = 0, k = 18; i > 0; k--, i--, j++) {
                     if (j >= count) {
                         break;
                     }
+                    ot = &g_ot_2d[g_frame_buffer_index];
                     spr[k].x = (count - j) * 8 + 0x87;
                     spr[k].y = 0xC4;
-                    GsSortFastSprite(&spr[k], &g_ot_2d[g_frame_buffer_index], 0);
+                    GsSortFastSprite(&spr[k], ot, 0);
                 }
                 if (tick == 0) {
                     if (count == 20) {
@@ -660,13 +654,14 @@ s32 sskn_scene_run(void) {
                             break;
                     }
                 }
-                for (j = 0, n = 5, k = 18; n > 0; j++, n--, k--) {
+                for (i = 5, j = 0, k = 18; i > 0; k--, i--, j++) {
                     if (j >= count) {
                         break;
                     }
+                    ot = &g_ot_2d[g_frame_buffer_index];
                     spr[k].x = (count - j) * 8 + 0x87;
                     spr[k].y = 0xC4;
-                    GsSortFastSprite(&spr[k], &g_ot_2d[g_frame_buffer_index], 0);
+                    GsSortFastSprite(&spr[k], ot, 0);
                 }
                 break;
             case 4:
@@ -697,9 +692,6 @@ end:
     pad_read_command();
     return result;
 }
-#else
-INCLUDE_ASM("asm/nonmatchings/game/80039734", sskn_scene_run);
-#endif
 
 /* malloc: first-fit search from the free-block rover, splitting large blocks. */
 void *heap_alloc(u32 size) {
@@ -1373,14 +1365,6 @@ static inline void DrawNoise(RECT *rect) {
     }
 }
 
-#ifdef NON_MATCHING
-/* 58 diffs, register allocation: `delay` should be spilled and `blink` kept
- * in $fp. Also needs its own .rodata ("press ANY button").
- * The `tile_state[k] = 1; delay = 1;` order (from decomp-permuter) and
- * `(s16)(g_gate_obj_screen_y - 4)`, which keeps the subtraction off the u16 narrowing, both help.
- * Keeping `delay`/`done` in a stack array (s32 v[2]) gets 72: the original spills
- * them. Remaining: &tiles[0] is kept in a stack slot instead of being recomputed
- * from $sp, and a few constants land in t3 vs v0. */
 /* Title screen: 44 logo tiles fly in one by one from random positions, then
  * the logo and a blinking "press ANY button" are shown until a button press. */
 void gate_scene_run(void) {
@@ -1496,10 +1480,14 @@ void gate_scene_run(void) {
                         tile_state[i]++;
                         GsSortFastSprite(&tiles[i], &g_ot_2d[g_frame_buffer_index], 1);
                     } else if (tile_state[i] != 0) {
-                        done++;
                         GsSortFastSprite(&tiles[i], &g_ot_2d[g_frame_buffer_index], 1);
+                        done++;
                     }
                 }
+                /* empty statement, probably a compiled-out debug macro; it
+                 * keeps loop.c from hoisting the constant 44 below */
+                do {
+                } while (0);
                 if (done == 44) {
                     phase++;
                 }
@@ -1510,8 +1498,8 @@ void gate_scene_run(void) {
                 rect.w = 8;
                 rect.h = 0x58;
                 MoveImage(&rect, 0x380, 0x58);
-                g_gate_fly_pending = 1;
                 phase = 2;
+                g_gate_fly_pending = 1;
                 break;
             case 2:
                 if (g_gate_fly_pending == 0) {
@@ -1547,9 +1535,6 @@ void gate_scene_run(void) {
     }
     fog_disable();
 }
-#else
-INCLUDE_ASM("asm/nonmatchings/game/80039734", gate_scene_run);
-#endif
 
 s32 mcard_start(void) {
     MemCardInit(0);

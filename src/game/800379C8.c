@@ -809,12 +809,6 @@ void bg_curve_randomize(s32 index, s32 mirror) {
     }
 }
 
-#ifdef NON_MATCHING
-/* 16 diffs: t and b swap registers ($a2/$v1): local-alloc gives t (5 refs over 9 insns)
- * a higher priority than the (0x100 - t)^2 temp, the original the other way round.
- * Tried: a `0x100 - t` local, no t (g_bg_curve_t[index] read each time), u16/u32 t, every
- * operand order and statement order of the a/b products, shifts folded in (16-26).
- * decomp-permuter (20 min) found nothing valid. */
 /* Evaluate curve `index` at its current t (cubic Bernstein terms
  * t^2(1-t) and t(1-t)^2) and append the point to its history. */
 void bg_curve_step(s32 index) {
@@ -825,9 +819,13 @@ void bg_curve_step(s32 index) {
     s32 y;
 
     t = g_bg_curve_t[index];
-    a = ((t * t) >> 8) * (0x100 - t);
-    b = (((0x100 - t) * (0x100 - t)) >> 8) * t;
+    a = t * t;
     a >>= 8;
+    a *= 0x100 - t;
+    a >>= 8;
+    b = (0x100 - t) * (0x100 - t);
+    b >>= 8;
+    b *= t;
     b >>= 8;
     x = a * g_bg_curve_ctrl[index][0] + b * g_bg_curve_ctrl[index][2];
     y = a * g_bg_curve_ctrl[index][1] + b * g_bg_curve_ctrl[index][3];
@@ -840,9 +838,6 @@ void bg_curve_step(s32 index) {
         g_bg_curve_len[index]++;
     }
 }
-#else
-INCLUDE_ASM("asm/nonmatchings/game/800379C8", bg_curve_step);
-#endif
 
 /* Allocate buffers and randomise the 16 curves. */
 void bg_curves_init(void) {

@@ -91,7 +91,10 @@ typedef struct {
 extern u32 g_empty_tmd;
 extern u32 g_movie_model_tim0;
 extern u32 g_movie_model_tim1;
-extern u32 *g_movie_model_tmds[];
+/* Two-entry TMD tables (normal and highlighted). Small data addressed absolutely: the
+ * section attribute keeps the unsplit `la` macro, which reorg does not put in a delay slot. */
+extern u32 *g_movie_model_tmds[2] __attribute__((section(".data")));
+extern u32 *g_movie_model_tmds_hi[2] __attribute__((section(".data")));
 extern u8 g_movie_model_kinds[];
 extern s16 g_movie_models_center_x;
 extern s16 g_movie_models_center_y;
@@ -530,20 +533,9 @@ void streak_update_falling(Streak *s) {
     }
 }
 
-#ifdef NON_MATCHING
-/* 3 diffs, in the model-table lookup: the sum `t += k` lands in v1 (the
- * original reuses the index's v0), which moves `lbu` after `lui v1,%hi(g_movie_model_tmds)`.
- * `g_movie_model_tmds[g_movie_model_kinds[i]]` passed directly makes GCC hoist the table address into $s8
- * (one more saved register, which shifts everything); going through `t` keeps it in the
- * loop like the original (lifetime 2 in -dL: "not desirable"). Loading the index into
- * `k` first (found by decomp-permuter) gets the index/base registers right. Tried for the
- * sum: `t[k]`, `*(t + k)` (hoist again, 33), a second pointer (33), `&t[k]`, s32/u32 k (3),
- * `*(t += k)` (3). movie_models_update has the same pattern. */
 /* Set up the central model (40) and its eight satellites (41..48), textures and light. */
 void movie_models_init(void) {
     u32 i;
-    u32 **t;
-    u8 k;
 
     model_reset_coord(&g_models[40]);
     model_map_tmd(&g_empty_tmd, &g_models[40]);
@@ -554,10 +546,7 @@ void movie_models_init(void) {
     model_update_matrix(&g_models[40]);
     for (i = 0; i < 8; i++) {
         model_reset_coord(&g_models[41 + i]);
-        k = g_movie_model_kinds[i];
-        t = g_movie_model_tmds;
-        t += k;
-        model_map_tmd(*t, &g_models[41 + i]);
+        model_map_tmd(g_movie_model_tmds[g_movie_model_kinds[i]], &g_models[41 + i]);
         model_link(&g_models[41 + i], &g_models[40].coord);
         g_models[41 + i].coord.coord.t[0] = g_movie_model_start_pos[i].vx;
         g_models[41 + i].coord.coord.t[1] = g_movie_model_start_pos[i].vy;
@@ -581,30 +570,13 @@ void movie_models_init(void) {
     g_flat_lights[2].r = 0x30;
     GsSetFlatLight(2, &g_flat_lights[2]);
 }
-#else
-INCLUDE_ASM("asm/nonmatchings/game/80031378", movie_models_init);
-#endif
 
-#ifdef NON_MATCHING
-/* 16 diffs: `sel` and the hoisted &g_models[0] base swap $s6/$s7, and one
- * `lui` lands in a delay slot. Taking the table entries' addresses into `t` first (as in
- * movie_models_init) gets the index/base order right in both branches. Tried: declaration order,
- * u32/u8/s16 sel (16-20), `sel == g_movie_model_kinds[i]`, `k = g_movie_model_kinds[i]` shared by both
- * branches (16-25). decomp-permuter: wrapping the case-1 loop and its `break` in
- * `do { ... } while (0)` (a second loop level, which reweights the allocation) fixes
- * the s6/s7 swap (10 diffs); left out as implausible. What remains then is reorg filling
- * the `bne v0,s7` delay slot with the else branch's `lui v1` (the original leaves a nop).
- * Direct indexing: the original loads g_movie_model_kinds[i] once, into v0, then sll's it before building the
- * table base in each branch; with the table indexed directly, the base (a block-local
- * pseudo) is set before the sll, so local-alloc gives it v0 first (-dg). */
-extern u32 *g_movie_model_tmds_hi[];
 extern s16 g_text_window_busy __attribute__((section(".data")));
 
 /* Per-frame update of the eight satellite models: slide them in, then swap models on input. */
 void movie_models_update(s16 input) {
     u32 i;
     s32 sel;
-    u32 **t;
 
     switch (g_movie_models_state) {
     case 0:
@@ -639,8 +611,7 @@ void movie_models_update(s16 input) {
         for (i = 0; i < 8; i++) {
             model_reset_coord(&g_models[41 + i]);
             if (g_movie_model_kinds[i] == sel) {
-                t = &g_movie_model_tmds_hi[g_movie_model_kinds[i]];
-                model_map_tmd(*t, &g_models[41 + i]);
+                model_map_tmd(g_movie_model_tmds_hi[g_movie_model_kinds[i]], &g_models[41 + i]);
                 if (i < 2) {
                     if (i == 1) {
                         g_movie_model1_spin += 45;
@@ -651,10 +622,11 @@ void movie_models_update(s16 input) {
                         g_movie_model1_spin = 0;
                         g_models[41 + i].rot.vy = g_movie_model0_spin;
                     }
+                } else {
+                    g_models[41 + i].rot.vy = 0;
                 }
             } else {
-                t = &g_movie_model_tmds[g_movie_model_kinds[i]];
-                model_map_tmd(*t, &g_models[41 + i]);
+                model_map_tmd(g_movie_model_tmds[g_movie_model_kinds[i]], &g_models[41 + i]);
                 g_models[41 + i].rot.vy = 0;
             }
             model_link(&g_models[41 + i], &g_models[40].coord);
@@ -668,9 +640,6 @@ void movie_models_update(s16 input) {
         break;
     }
 }
-#else
-INCLUDE_ASM("asm/nonmatchings/game/80031378", movie_models_update);
-#endif
 
 /* 0x1C-byte model descriptor at the start of a loaded TMD block (see 8002A344.c). */
 typedef struct {

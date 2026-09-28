@@ -280,7 +280,7 @@ extern s16 g_site_open_burst_pos[2];
 extern s16 D_800A69CC; /* = z of g_site_open_burst_pos */
 extern LineObj g_site_open_lines[];
 extern Obj58 g_site_open_spark_coords[];
-extern u8 g_node_open_tim[];
+extern u32 g_node_open_tim;
 extern SVECTOR g_site_open_anim0_path[];
 extern SVECTOR g_site_open_anim1_path[];
 extern SVECTOR g_site_open_shard_steps[];
@@ -1547,21 +1547,6 @@ void node_open_anim_approach(void) {
     }
 }
 
-#ifdef NON_MATCHING
-/*
- * Also needs .rodata (jump table jtbl_800115C0). g_site_open_cell and g_site_open_burst_pos
- * are accessed as %gp_rel(sym+off), which maspsx in ASPSX 2.56 mode refuses
- * for .comm symbols. With PROBE_ASPSX=2.79: 13 diffs, all from the loop counter
- * reset (i = 0) in case 2 being placed at the loop instead of in the delay slot
- * of the tim_upload call. In the original, `i = 0` comes right before the jal,
- * and DrawSync(0) still uses $zero. Here combine merges i = 0 into the duplicated
- * loop-entry test (a 3-insn combine that leaves the set next to the branch). With
- * `if (count2) do ... while` instead, sched1 moves the set down into the lw delay.
- * An asm barrier plus the do-while gets to 2 diffs (i = 0 after the call, and
- * DrawSync gets `move a0,s2`), so the original probably has a real block boundary
- * here. Moving i = 0 before or after the call, while forms and
- * `do {} while (0)` do not help. decomp-permuter (20 min) found nothing better.
- */
 /*
  * Runs one step of the scene-transition camera sequence selected by
  * g_site_open_anim (0-4), counting g_site_open_timer down to 0; includes the particle
@@ -1761,7 +1746,7 @@ void node_open_anim_effect(void) {
             g_site_node_models[99].flags |= 0x80000000;
         } else {
             if (g_site_open_timer == 12) {
-                tim_upload(g_node_open_tim);
+                tim_upload(&g_node_open_tim);
                 GsGetTimInfo(g_site_node_tims[g_site_grid[g_site_open_cell.row][g_site_open_cell.col].texture] + 1, &image);
                 rect.x = image.cx;
                 rect.y = image.cy;
@@ -1911,9 +1896,6 @@ void node_open_anim_effect(void) {
         break;
     }
 }
-#else
-INCLUDE_ASM("asm/nonmatchings/game/8002A344", node_open_anim_effect);
-#endif
 
 /* Sets up the four texture pages of g_site_bg_sprites and clears the right half of VRAM. */
 void site_bg_init(void) {

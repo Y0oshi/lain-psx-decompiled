@@ -170,8 +170,7 @@ typedef struct {
 /*
  * This file holds two original translation units. 80018A38..80018F0C (pad input and
  * menu cursor) addresses g_current_site/g_pad_command/g_polytan_parts via $gp; 80018F48..8001D0C8 (movie
- * and music player) addresses them absolutely. Functions of the second part that touch them
- * are under NON_MATCHING until the file is split.
+ * and music player) addresses them absolutely.
  *
  * Globals declared as one-element arrays (g_slideshow_file0/C2/C4, g_vlc_qscale_chroma/5E) are accessed
  * "in struct" by GCC's alias analysis, which keeps their stores ordered against pointer loads.

@@ -223,13 +223,9 @@ extern MenuObject g_site_prompt_ring;
 extern void sprite_draw_rotated(MenuObject *obj, GsOT *ot, s32 pri);
 
 
-#ifdef NON_MATCHING
-/* 2 diffs (also needs .rodata for its jump table): the hoisted loads of
- * &g_ot_2d and &g_site_prompt_sprites before the loop come out in swapped order
- * (loop.c hoists in order of first use; the y store uses g_site_prompt_sprites first).
- * Register choice already matches (s7/s5, -dg); only the emission order differs.
- * decomp-permuter (50 min) found nothing better; ternary/swapped y store, do-while
- * or pointer-arithmetic forms of the inner loop and `while (1)` stay at 2-59. */
+/* Current frame's OT in the double-buffered pair at `ot`. */
+#define OT_CUR(ot) ((GsOT *)(g_frame_buffer_index * sizeof(GsOT) + (u32)(ot)))
+
 /* "New game / Continue" style menu: animate the cursor and decorations
  * until the confirm input (g_pad_command == 17). Returns 3 or 0 for the
  * selected option. */
@@ -243,6 +239,7 @@ s32 site_change_prompt_run(void) {
     s32 i;
     s32 next;
     s32 result;
+    GsOT *ot;
 
     tim_load_file_at(0x1F, 0x300, 0x198, 0, 0x1E8);
     rect.x = 0;
@@ -273,6 +270,7 @@ s32 site_change_prompt_run(void) {
     g_site_prompt_ring.g = 0x80;
     g_site_prompt_ring.b = 0x80;
     for (;;) {
+        ot = g_ot_2d;
         DrawSync(0);
         gfx_frame_begin();
         pad_read_command();
@@ -303,20 +301,20 @@ s32 site_change_prompt_run(void) {
         } else {
             g_site_prompt_sprites[frame].y = 0x98;
         }
-        GsSortFastSprite(&g_site_prompt_sprites[frame], &g_ot_2d[g_frame_buffer_index], 4);
+        GsSortFastSprite(&g_site_prompt_sprites[frame], OT_CUR(ot), 4);
         if (flash != 0) {
             if (flash < 17) {
                 g_site_prompt_sprites[10].b = g_site_prompt_sprites[10].g = g_site_prompt_sprites[10].r = -0x80 - (16 - flash) * 8;
             } else if (flash >= 164) {
                 g_site_prompt_sprites[10].b = g_site_prompt_sprites[10].g = g_site_prompt_sprites[10].r = (180 - flash) * 8;
             }
-            GsSortFastSprite(&g_site_prompt_flash_sprite, &g_ot_2d[g_frame_buffer_index], 5);
+            GsSortFastSprite(&g_site_prompt_flash_sprite, OT_CUR(ot), 5);
             flash--;
         } else if (rand() % 500 == 0) {
             flash = 180;
         }
         for (i = 9; i >= 8; i--) {
-            GsSortFastSprite(&g_site_prompt_sprites[i], &g_ot_2d[g_frame_buffer_index], 5);
+            GsSortFastSprite(&g_site_prompt_sprites[i], OT_CUR(ot), 5);
         }
         next = phase + 1;
         if (next >= 4) {
@@ -324,17 +322,17 @@ s32 site_change_prompt_run(void) {
         }
         g_site_prompt_sprites[phase + 11].x = 0;
         g_site_prompt_sprites[next + 11].x = 0xA0;
-        GsSortFastSprite(&g_site_prompt_strip_sprites[phase], &g_ot_2d[g_frame_buffer_index], 6);
-        GsSortFastSprite(&g_site_prompt_strip_sprites[next], &g_ot_2d[g_frame_buffer_index], 6);
+        GsSortFastSprite(&g_site_prompt_strip_sprites[phase], OT_CUR(ot), 6);
+        GsSortFastSprite(&g_site_prompt_strip_sprites[next], OT_CUR(ot), 6);
         g_site_prompt_ring.rotZ = rotation;
-        sprite_draw_rotated(&g_site_prompt_ring, &g_ot_2d[g_frame_buffer_index], 4);
+        sprite_draw_rotated(&g_site_prompt_ring, OT_CUR(ot), 4);
         VSync(0);
         VSync(0);
         ResetGraph(1);
         GsSwapDispBuff();
         rotation += 0x10;
-        GsSortClear(0, 0, 0, &g_ot_2d[g_frame_buffer_index]);
-        GsDrawOt(&g_ot_2d[g_frame_buffer_index]);
+        GsSortClear(0, 0, 0, OT_CUR(ot));
+        GsDrawOt(OT_CUR(ot));
         if (rotation >= 0x1000) {
             rotation = 0;
         }
@@ -357,6 +355,3 @@ done:
     ClearImage(&rect, 0, 0, 0);
     return result;
 }
-#else
-INCLUDE_ASM("asm/nonmatchings/game/8003D1B4", site_change_prompt_run);
-#endif

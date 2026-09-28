@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/Y0oshi/lain-psx-decompiled/actions/workflows/port.yml"><img src="https://github.com/Y0oshi/lain-psx-decompiled/actions/workflows/port.yml/badge.svg?branch=main" alt="Build"></a>
   <a href="https://github.com/Y0oshi/lain-psx-decompiled/releases"><img src="https://img.shields.io/badge/download-releases-e0435c" alt="Download"></a>
-  <img src="https://img.shields.io/badge/matching-308%2F321%20functions%20(85.8%25)-e0435c" alt="Matching progress">
+  <img src="https://img.shields.io/badge/matching-321%2F321%20functions%20(100%25)-2ea44f" alt="Matching progress">
   <img src="https://img.shields.io/badge/EXE-byte--identical-2ea44f" alt="Byte-identical EXE">
   <img src="https://img.shields.io/badge/language-C-555555?logo=c" alt="C">
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-6d6780" alt="Platforms">
@@ -74,7 +74,7 @@ Gamepads work as controller 1. Full controls and options:
 
 | Part | State |
 |---|---|
-| Decompilation (`src/`) | Every function has C. 308 of 321 game functions compile to the original bytes; the other 13 link from their original assembly. The EXE is byte-identical. |
+| Decompilation (`src/`) | All 321 game functions are C that compiles to the original bytes, and the EXE is byte-identical. Sony's PsyQ libraries link from their original code. |
 | Native client (`port/`) | Plays the whole game: both sites, all voice sessions and movies, disc swap, all four endings. |
 | Naming | Most functions, globals and struct fields are named. |
 

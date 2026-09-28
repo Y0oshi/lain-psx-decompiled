@@ -244,17 +244,9 @@ void polytan_scene_load(void) {
 
 INCLUDE_RODATA("asm/nonmatchings/game/8003D6A8", D_80011D40);
 
-#ifdef NON_MATCHING
-/* 59 diffs per check.sh (also needs .rodata for its jump table), register
- * allocation only: the original hoists &g_polytan_sprites out of the outer loop into $s7 (the sprite pointer
- * is a biv, `move s0,s7` per frame) and keeps only %hi(g_ot_2d) in $s5, and it does
- * not strength-reduce the switch index ((i - 6) * 4). That points to higher register
- * pressure in the outer loop: decomp-permuter got 23 diffs by testing a copy of `frame`
- * (`f2 = frame;` after pad_read_command) instead of `frame`, which isn't plausible source.
- * A GsSPRITE pointer walking g_polytan_sprites (`sp = g_polytan_sprites; ... sp++`) gives 61, 50
- * with the copy; u32/s16/u16/u8 `i` 59-77. */
 /* Title screen loop: draw the title sprites (some gated by g_polytan_parts flag
- * bits) until a button is pressed, blinking the "press ANY button" prompt. */
+ * bits) until a button is pressed, blinking the "press ANY button" prompt.
+ * Each case draws on its own; cross-jumping merges the calls into one. */
 void polytan_scene_run(void) {
     RECT rect;
     s32 frame;
@@ -279,37 +271,39 @@ void polytan_scene_run(void) {
         for (i = 0; i < 15; i++) {
             switch (i) {
                 case 6:
-                    if (!(g_polytan_parts & 0x8)) {
-                        continue;
+                    if (g_polytan_parts & 0x8) {
+                        GsSortFastSprite(&g_polytan_sprites[i], &g_ot_2d[g_frame_buffer_index], 1);
                     }
                     break;
                 case 7:
-                    if (!(g_polytan_parts & 0x1)) {
-                        continue;
+                    if (g_polytan_parts & 0x1) {
+                        GsSortFastSprite(&g_polytan_sprites[i], &g_ot_2d[g_frame_buffer_index], 1);
                     }
                     break;
                 case 8:
-                    if (!(g_polytan_parts & 0x2)) {
-                        continue;
+                    if (g_polytan_parts & 0x2) {
+                        GsSortFastSprite(&g_polytan_sprites[i], &g_ot_2d[g_frame_buffer_index], 1);
                     }
                     break;
                 case 9:
-                    if (!(g_polytan_parts & 0x4)) {
-                        continue;
+                    if (g_polytan_parts & 0x4) {
+                        GsSortFastSprite(&g_polytan_sprites[i], &g_ot_2d[g_frame_buffer_index], 1);
                     }
                     break;
                 case 10:
-                    if (!(g_polytan_parts & 0x10)) {
-                        continue;
+                    if (g_polytan_parts & 0x10) {
+                        GsSortFastSprite(&g_polytan_sprites[i], &g_ot_2d[g_frame_buffer_index], 1);
                     }
                     break;
                 case 11:
-                    if (!(g_polytan_parts & 0x20)) {
-                        continue;
+                    if (g_polytan_parts & 0x20) {
+                        GsSortFastSprite(&g_polytan_sprites[i], &g_ot_2d[g_frame_buffer_index], 1);
                     }
                     break;
+                default:
+                    GsSortFastSprite(&g_polytan_sprites[i], &g_ot_2d[g_frame_buffer_index], 1);
+                    break;
             }
-            GsSortFastSprite(&g_polytan_sprites[i], &g_ot_2d[g_frame_buffer_index], 1);
         }
         if (frame >= 30) {
             if (g_pad_command != 0) {
@@ -338,9 +332,6 @@ void polytan_scene_run(void) {
     rect.h = 480;
     ClearImage(&rect, 0, 0, 0);
 }
-#else
-INCLUDE_ASM("asm/nonmatchings/game/8003D6A8", polytan_scene_run);
-#endif
 
 extern s16 g_gfx_load_step;
 extern u32 *g_menu_scroll_tim ABS;
