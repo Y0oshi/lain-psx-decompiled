@@ -30,6 +30,9 @@
 #include "lain_xa.h"
 
 #include "discs.h"
+#include "mods.h"
+#include "modrt.h"
+#include "hdtex.h"
 #include "overlay.h"
 #include "app_icon.h"
 #include "psx_arena.h"
@@ -600,6 +603,7 @@ static void log_lain_anim(void) {
 
 static void on_end_scene(void) {
     frame_count++;
+    modrt_frame();
     log_lain_anim();
     check_disc_swap();
     update_subtitle();
@@ -792,6 +796,13 @@ static int boot_game(const Settings *initial, const char *disc1, const char *dis
     if (bad != 0) {
         fprintf(stderr, "lain: %d pointer words outside PS1 RAM\n", bad);
     }
+    /* Player mods: file tables in the arena and the disc reader (client/mods.cpp). */
+    mods_apply(settings->mods, disc1, disc2);
+    mods_apply_data(settings->mods);
+    /* Mod scripts and plugins: hooks on game functions, events (client/modrt.cpp). */
+    modrt_start(settings->mods);
+    /* HD texture packs, and the texture dump for making them (client/hdtex.cpp). */
+    hdtex_start(settings->mods, getenv("LAIN_DUMP_TEXTURES") ? atoi(getenv("LAIN_DUMP_TEXTURES")) : settings->dump_textures);
     /* Internal resolution: 320x240 times render_scale, scaled to the window;
      * 0 renders at the window's own (HiDPI) resolution. LAIN_RENDER_SCALE (tests)
      * overrides it without saving to settings.ini. */
@@ -849,6 +860,7 @@ static int boot_game(const Settings *initial, const char *disc1, const char *dis
         LainMcrd_SetCardPath(0, card);
     }
     debug_hooks_init();
+    atexit(modrt_quit);
     /* Stop the CD drive thread before the process tears down (it runs game callbacks). */
     atexit(LainCD_Shutdown);
     lain_game_main(); /* never returns */
@@ -877,6 +889,29 @@ int main(int argc, char **argv) {
     }
     if (argc >= 2 && strcmp(argv[1], "--selftest") == 0) {
         return selftest();
+    }
+    /* `lain --check-mods`: the installed mods and the state of each file.
+     * `lain --export-originals [dir]`: every archive entry as mod files. */
+    if (argc >= 2 && (strcmp(argv[1], "--check-mods") == 0 || strcmp(argv[1], "--export-originals") == 0)) {
+        Settings s;
+        char d1[1024], d2[1024], msg[256] = "", out[1100];
+        settings_load(&s);
+        int have1 = discs_imported(settings_data_dir(), DISC_1, d1, sizeof d1);
+        int have2 = discs_imported(settings_data_dir(), DISC_2, d2, sizeof d2);
+        if (!have1) {
+            fprintf(stderr, "import your discs first (lain --import disc1.cue disc2.cue)\n");
+            return 1;
+        }
+        if (strcmp(argv[1], "--check-mods") == 0) {
+            return mods_check_cli(s.mods, d1, have2 ? d2 : NULL);
+        }
+        snprintf(out, sizeof out, "%s", argc >= 3 ? argv[2] : "");
+        if (!out[0]) {
+            snprintf(out, sizeof out, "%smods/_originals", settings_data_dir());
+        }
+        int n = mods_export_originals(d1, have2 ? d2 : NULL, out, NULL, msg, sizeof msg);
+        printf("%s: %s\n", out, msg);
+        return n > 0 ? 0 : 1;
     }
     if (argc >= 3 && strcmp(argv[1], "--import") == 0) {
         SDL_Init(SDL_INIT_EVENTS);

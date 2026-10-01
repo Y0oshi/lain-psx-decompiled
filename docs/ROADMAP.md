@@ -15,6 +15,7 @@
 | Presentation | Render scale, fullscreen, node map paced like the PS1, optional 60 fps in-between frames |
 | Packs | Subtitle packs (SRT/ASS, node-name lookup, one-click download of the laingame.net fan set), dub packs |
 | Extras | Cheats tab (open any node, turbo, Genome save title, live hidden stats); launcher "Unused" tab |
+| Mods | Mods folder managed in the launcher's Mods tab: archive and program files, movies and voice files, game data (JSON), HD texture packs, Lua scripts hooking any of the 276 game functions, native plugins; export of every original ([MODDING.md](../port/MODDING.md)) |
 | Platforms | Windows, macOS and Linux builds in CI ([port.yml](../.github/workflows/port.yml)) |
 
 ## Open work

@@ -47,7 +47,7 @@ executable is identical.
    and copies them into its data folder.
 4. Choose window size, subtitles and options, then press **Play**.
 
-**F1** opens the in-game menu: display, volume, languages, key bindings and cheats.
+**F1** opens the in-game menu: display, volume, languages, key bindings, cheats and mods.
 
 | PlayStation | Keyboard | In Lain |
 |---|---|---|
@@ -69,6 +69,7 @@ Gamepads work as controller 1. Full controls and options:
 | Subtitles and dubs | Plain `.srt`, `.ass` and `.ogg` folder packs. The launcher can download the laingame.net English fan subtitles from their source; none are bundled. |
 | Saves | Standard 128 KiB memory card images (`.mcd`), usable with emulators. |
 | Unused content | A launcher tab showing content on the discs that the game never uses, decoded from your own dump. See [docs/findings](docs/findings/README.md). |
+| Mods | Replace pictures, text, voices, movies and game data, HD texture packs, Lua scripts that hook any game function, and native plugins, managed in the launcher's Mods tab. See [MODDING.md](port/MODDING.md). |
 
 ## Status
 
@@ -128,7 +129,7 @@ A successful build ends with `build/SLPS_016.03: OK`. To work on functions, see
 | `tools/` | Disc extraction, build and matching tools |
 | `port/game/` | 64-bit copy of the game code used by the client |
 | `port/psx/` | PlayStation SDK reimplementation, based on PsyCross |
-| `port/client/` | Launcher, overlay, settings, subtitle and dub packs |
+| `port/client/` | Launcher, overlay, settings, subtitle and dub packs, mods |
 | `docs/` | Technical documentation and findings |
 
 ## Documentation
@@ -138,6 +139,7 @@ A successful build ends with `build/SLPS_016.03: OK`. To work on functions, see
 | [DECOMPILATION.md](docs/DECOMPILATION.md) | How the decompilation is organised |
 | [MATCHING.md](docs/MATCHING.md) | Matching workflow and tools |
 | [PORTING.md](port/PORTING.md) | Client internals, pack formats, options |
+| [MODDING.md](port/MODDING.md) | Making and using mods |
 | [findings](docs/findings/README.md) | Unused and hidden content |
 | [ROADMAP.md](docs/ROADMAP.md) | Open work |
 

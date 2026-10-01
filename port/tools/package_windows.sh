@@ -18,7 +18,7 @@ cp -R thirdparty "$STAGE/thirdparty"
 docker run --rm -v "$STAGE/port":/src:ro -v "$STAGE/LICENSE":/lic/LICENSE:ro -v "$STAGE/thirdparty":/lic/thirdparty:ro -v "$PWD/dist":/out ubuntu:24.04 bash -euc '
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
-apt-get install -y -qq mingw-w64 cmake ninja-build git zip >/dev/null
+apt-get install -y -qq mingw-w64 cmake ninja-build git zip python3 >/dev/null
 cat > /opt/tc.cmake <<EOF
 set(CMAKE_SYSTEM_NAME Windows)
 set(CMAKE_C_COMPILER x86_64-w64-mingw32-gcc-posix)

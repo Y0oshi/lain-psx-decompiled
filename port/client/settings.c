@@ -64,15 +64,15 @@ static void settings_path(char *out, size_t cap) {
 
 void settings_load(Settings *s) {
     settings_defaults(s);
-    char path[1024], line[256];
+    char path[1024], line[2200];
     settings_path(path, sizeof path);
     FILE *f = fopen(path, "r");
     if (!f) {
         return;
     }
     while (fgets(line, sizeof line, f)) {
-        char key[64], val[128];
-        if (sscanf(line, " %63[^= ] = %127[^\r\n]", key, val) != 2) {
+        char key[64], val[2048];
+        if (sscanf(line, " %63[^= ] = %2047[^\r\n]", key, val) != 2) {
             continue;
         }
         if (!strcmp(key, "fullscreen")) s->fullscreen = atoi(val);
@@ -88,6 +88,8 @@ void settings_load(Settings *s) {
         else if (!strcmp(key, "text_lang")) snprintf(s->text_lang, sizeof s->text_lang, "%s", val);
         else if (!strcmp(key, "voice_lang")) snprintf(s->voice_lang, sizeof s->voice_lang, "%s", val);
         else if (!strcmp(key, "setup_done")) s->setup_done = atoi(val);
+        else if (!strcmp(key, "mods")) snprintf(s->mods, sizeof s->mods, "%s", val);
+        else if (!strcmp(key, "dump_textures")) s->dump_textures = atoi(val);
         else if (!strncmp(key, "key_", 4)) {
             for (int i = 0; i < SETTINGS_NUM_KEYS; i++) {
                 if (!strcmp(key + 4, SETTINGS_KEY_NAMES[i])) {
@@ -119,6 +121,7 @@ void settings_save(const Settings *s) {
             s->cheat_genome);
     fprintf(f, "text_lang = %s\nvoice_lang = %s\nsetup_done = %d\n", s->text_lang, s->voice_lang,
             s->setup_done);
+    fprintf(f, "; mods in load order: +on / -off\nmods = %s\ndump_textures = %d\n", s->mods, s->dump_textures);
     fprintf(f, "; keyboard: SDL key names\n");
     for (int i = 0; i < SETTINGS_NUM_KEYS; i++) {
         fprintf(f, "key_%s = %s\n", SETTINGS_KEY_NAMES[i], s->keys[i]);

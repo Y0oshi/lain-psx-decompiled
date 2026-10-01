@@ -1,0 +1,7 @@
+{
+  // Changes to nodes, found by name (or number, 0 to 715).
+  "nodes": [
+    { "node": "Cou001", "name": "Mod001" },
+    { "node": "Cou002", "column": 5 }
+  ]
+}

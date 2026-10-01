@@ -73,22 +73,44 @@ target_include_directories(tinyfd PUBLIC external/tinyfiledialogs)
 # The PS1 RAM arena with every game global at its original offset (generated).
 add_library(psx_arena STATIC game/generated/psx_arena.S)
 
+# Lua (MIT): mod scripts.
+file(GLOB LUA_SRCS external/lua/*.c)
+add_library(lua STATIC ${LUA_SRCS})
+target_include_directories(lua PUBLIC external/lua)
+if(NOT WIN32)
+    target_compile_definitions(lua PRIVATE LUA_USE_POSIX)
+endif()
+
 add_library(client STATIC
     client/discs.c client/settings.c client/sha1.c client/setup_ui.cpp
     client/iso.c client/psx_mem.c client/overlay.cpp client/packs.cpp client/sub_download.cpp client/unused_gallery.cpp client/app_icon.c
     client/tracks.c client/subtitles.c client/subtitle_kit.c client/dub.c client/dub_player.c
+    client/mods.cpp client/mods_ui.cpp client/modrt.cpp client/moddata.cpp client/hdtex.cpp client/json.cpp client/napk.c client/png.c client/tim.c
     external/stb/stb_vorbis_impl.c)
 target_include_directories(client PUBLIC client game/include external/stb)
-target_link_libraries(client PUBLIC imgui tinyfd psx SDL2::SDL2)
+target_link_libraries(client PUBLIC imgui tinyfd psx lua SDL2::SDL2)
 
-# The ported game code (every function has C; see game/PORT_TYPES.md).
+# The ported game code (every function has C; see game/PORT_TYPES.md). It is
+# compiled from copies in which every game function can be replaced at run time
+# by mods (tools/gen_hooks.py; game/*.c is unchanged).
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 file(GLOB GAME_SRCS CONFIGURE_DEPENDS game/*.c)
-add_library(game STATIC ${GAME_SRCS})
+set(HOOKS_DIR ${CMAKE_CURRENT_BINARY_DIR}/hooks)
+set(GAME_HOOKED_SRCS ${HOOKS_DIR}/game_hooks.c)
+foreach(src ${GAME_SRCS})
+    get_filename_component(name ${src} NAME)
+    list(APPEND GAME_HOOKED_SRCS ${HOOKS_DIR}/game/${name})
+endforeach()
+add_custom_command(OUTPUT ${GAME_HOOKED_SRCS}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_hooks.py ${HOOKS_DIR}
+    DEPENDS ${GAME_SRCS} tools/gen_hooks.py game/include/game_protos.h game/generated/symbols.txt game/PORT_TYPES.md
+    COMMENT "Generating hookable game functions")
+add_library(game STATIC ${GAME_HOOKED_SRCS})
 target_include_directories(game PUBLIC game/include)
 target_compile_definitions(game PRIVATE NON_MATCHING NEEDS_RODATA NEEDS_SDATA)
 target_link_libraries(game PUBLIC psx)
 # The game's main() becomes lain_game_main(), called by src/main.c.
-set_source_files_properties(game/80013138.c PROPERTIES COMPILE_DEFINITIONS main=lain_game_main)
+set_source_files_properties(${HOOKS_DIR}/game/80013138.c PROPERTIES COMPILE_DEFINITIONS main=lain_game_main)
 
 add_executable(lain src/main.c src/platform.c src/sdk_extra.c)
 target_link_libraries(lain PRIVATE client game psx psx_arena)

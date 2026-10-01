@@ -158,19 +158,30 @@ SDL audio device while the launcher is open.
 `LAIN_SETUP_TAB=unused` opens the launcher on that tab; `LAIN_SETUP_SCREENSHOT=<file>`
 saves the launcher window.
 
+### "Mods" tab
+
+Lists the mods in `<data folder>/mods/`, checks each file against the player's discs
+and sets their order and on/off state (`mods` in `settings.ini`). It also creates new
+mods, exports the original files as mod files, and turns on the texture dump for
+texture packs. Mods are applied when the game starts. See [MODDING.md](MODDING.md).
+`LAIN_SETUP_TAB=mods` opens the launcher on it.
+
 ## Source layout
 
 ```
 port/
   CMakeLists.txt
   PORTING.md          this file
+  MODDING.md          making and using mods
   compat/             small portability shims (e.g. <malloc.h> on macOS)
   psx/                PsyCross (vendored, MIT; see psx/UPSTREAM.txt) + additions
   game/               portable copy of the decompiled game C (from ../src/game)
-  client/             launcher/setup UI, disc import, settings, subtitle/dub overlay
+  client/             launcher/setup UI, disc import, settings, subtitle/dub overlay, mods
   src/                entry point, platform glue
-  tests/              standalone tests (gs_test, snd_test, str_decode, xa_decode)
-  tools/              code generators and packaging scripts
+  mod_examples/       example mods (game data, Lua scripts, a native plugin)
+  external/lua/       Lua 5.4 for mod scripts (vendored, MIT)
+  tests/              standalone tests (gs_test, snd_test, str_decode, xa_decode, mods_test)
+  tools/              code generators (gen_hooks.py, gen_symbols.py, ...), packaging
 ```
 
 ### Global data
@@ -316,13 +327,13 @@ the window's resolution. Alt+Enter, and Cmd+Ctrl+F on macOS, toggle fullscreen.
 
 ### In-game menu
 
-F1 (or a gamepad's Guide/Home button) opens a menu over the running game with three
-tabs: Settings, Controls and Cheats. It covers fullscreen, vsync, render scale, master
-volume, subtitle and voice language, keyboard bindings (click a button, press a key),
-cheats and quit. Changes apply at once and are saved to `settings.ini` when the menu
+F1 (or a gamepad's Guide/Home button) opens a menu over the running game with four
+tabs: Settings, Controls, Cheats and Mods. It covers fullscreen, vsync, render scale,
+master volume, subtitle and voice language, keyboard bindings (click a button, press a
+key), cheats, the mods in use (their settings and messages) and quit. Changes apply at once and are saved to `settings.ini` when the menu
 closes (Esc, F1 or Resume). The game keeps running underneath but receives no pad input
 while the menu is open. The menu responds to mouse, keyboard (arrows, Space/Return) and
-gamepad. `LAIN_MENU_TAB=cheats` opens the menu on the Cheats tab.
+gamepad. `LAIN_MENU_TAB=cheats` or `mods` opens the menu on that tab.
 
 ### Cheats
 
@@ -417,8 +428,10 @@ When the game asks for the other disc, the client swaps the imported image and s
 ## Running and debugging
 
 `lain --play` boots straight into the game with the saved settings and imported discs,
-skipping the launcher. A crash prints the faulting pc and a backtrace (symbolize with
-`atos -o lain -l <image base> <pc>`). Configure with `-DLAIN_TRACE=ON` to log each game
+skipping the launcher. `lain --check-mods` checks the installed mods and
+`lain --export-originals [folder]` writes the original files a mod replaces
+([MODDING.md](MODDING.md#command-line)). A crash prints the faulting pc and a backtrace
+(symbolize with `atos -o lain -l <image base> <pc>`). Configure with `-DLAIN_TRACE=ON` to log each game
 function the first time it runs.
 
 Debug environment variables (`src/main.c` unless noted):
@@ -445,6 +458,7 @@ Debug environment variables (`src/main.c` unless noted):
 | `LAIN_LOG_READS` | log every disc read |
 | `LAIN_SUBTITLE_PACK`, `LAIN_DUB_PACK` | load a pack folder directly |
 | `LAIN_SETUP_TAB`, `LAIN_SETUP_SCREENSHOT`, `LAIN_MENU_TAB` | open the launcher or F1 menu on a tab; save the launcher window |
+| `LAIN_DUMP_TEXTURES=1` | save every picture the game draws to `texture_dump/` (texture packs, [MODDING.md](MODDING.md)) |
 
 Scripted keys also arrive as SDL key events, so they drive the F1 menu. Hold them for
 one frame there (`F:Down:1`): at the game's 12 fps screens, a longer hold passes

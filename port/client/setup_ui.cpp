@@ -15,6 +15,7 @@
 #include "discs.h"
 #include "packs.h"
 #include "sub_download.h"
+#include "mods_ui.h"
 #include "unused_gallery.h"
 #include "app_icon.h"
 #include "imgui.h"
@@ -423,10 +424,18 @@ extern "C" int setup_ui_run(Settings *s) {
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
-        // Tests/docs: LAIN_SETUP_TAB=unused opens the launcher on the Unused tab.
+        // Tests/docs: LAIN_SETUP_TAB=mods / unused opens the launcher on that tab.
         static bool first_frame = true;
-        const bool open_unused = first_frame && getenv("LAIN_SETUP_TAB") && !strcmp(getenv("LAIN_SETUP_TAB"), "unused");
+        const char *want_tab = first_frame ? getenv("LAIN_SETUP_TAB") : nullptr;
+        const bool open_unused = want_tab && !strcmp(want_tab, "unused");
+        const bool open_mods = want_tab && !strcmp(want_tab, "mods");
         first_frame = false;
+        if (ImGui::BeginTabItem("Mods", nullptr, open_mods ? ImGuiTabItemFlags_SetSelected : 0)) {
+            ImGui::BeginChild("mods_page", ImVec2(0, -footer));
+            mods_tab_draw(s);
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
         if (ImGui::BeginTabItem("Unused", nullptr, open_unused ? ImGuiTabItemFlags_SetSelected : 0)) {
             ImGui::BeginChild("unused_page", ImVec2(0, -footer));
             gallery_draw(gallery);

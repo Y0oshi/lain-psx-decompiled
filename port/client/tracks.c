@@ -44,6 +44,38 @@ static void add_extent(const char *name, uint32_t lba, uint32_t size, void *user
     e->is_xa = xa;
 }
 
+typedef struct {
+    int disc;
+    char name[24]; /* as Extent.name */
+    uint32_t lba, sectors;
+} Move;
+static Move s_moves[64];
+static int s_move_count;
+
+static void apply_moves(void) {
+    for (int m = 0; m < s_move_count; m++) {
+        for (int i = 0; i < s_count[s_moves[m].disc]; i++) {
+            Extent *e = &s_ext[s_moves[m].disc][i];
+            if (strcmp(e->name, s_moves[m].name) == 0) {
+                e->lba = s_moves[m].lba;
+                e->sectors = s_moves[m].sectors;
+            }
+        }
+    }
+}
+
+void tracks_move(int disc, const char *name, unsigned lba, unsigned sectors) {
+    if (disc < 0 || disc > 1 || s_move_count == (int)(sizeof s_moves / sizeof s_moves[0])) {
+        return;
+    }
+    Move *m = &s_moves[s_move_count++];
+    m->disc = disc;
+    snprintf(m->name, sizeof m->name, "%s", name);
+    m->lba = lba;
+    m->sectors = sectors;
+    apply_moves();
+}
+
 void tracks_init(const char *disc1_bin, const char *disc2_bin) {
     const char *bins[2] = {disc1_bin, disc2_bin};
     for (int d = 0; d < 2; d++) {
@@ -60,6 +92,7 @@ void tracks_init(const char *disc1_bin, const char *disc2_bin) {
         iso_list_dir(img, "MOVIE2", add_extent, &c);
         fclose(img);
     }
+    apply_moves();
 }
 
 static const Extent *find(int disc, int lba, int want_xa) {

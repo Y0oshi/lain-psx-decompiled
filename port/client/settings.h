@@ -18,6 +18,10 @@ typedef struct {
     char text_lang[64];   /* "ja" (original) or a subtitle/UI pack code, e.g. "en" */
     char voice_lang[64];  /* "ja" (original) or an installed dub pack code */
     int setup_done;       /* setup window completed at least once */
+    /* Installed mods in load order (later ones win), each "+folder" (on) or
+     * "-folder" (off), separated by '|'. Folders not listed are new: on, last. */
+    char mods[2048];
+    int dump_textures;    /* save every picture the game draws, for texture packs */
     /* Keyboard mapping: SDL key names (e.g. "Return", "C", "Up") for the pad
      * buttons, in SETTINGS_KEY_NAMES order; stored as key_<button> = <name>. */
     char keys[16][32];

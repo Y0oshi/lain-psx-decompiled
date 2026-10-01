@@ -1,4 +1,5 @@
 #include "PsyX/PsyX_public.h"
+#include "lain_hd.h" // lain
 #include <math.h> /* lain: sinf/cosf (not pulled in transitively on MinGW) */
 
 #include "../platform.h"
@@ -769,6 +770,7 @@ typedef struct
 	GLint texLoc;
 	GLint lutLoc;
 	GLint stpPassLoc; // lain
+	GLint hdEnabledLoc, hdPlaceLoc; // lain
 #endif
 } PSXGPU_Shader;
 
@@ -891,8 +893,18 @@ GLint u_texelSizeLoc;
 	"	}\n"\
 	"	uniform int bilinearFilter;\n"\
 	"	uniform int stpPass; // lain: 1 = texels without STP only, 2 = texels with STP only\n"\
+	"	uniform int hdEnabled; // lain: HD replacement (lain_hd.h): colors from s_hd, STP from the original\n"\
+	"	uniform sampler2D s_hd;\n"\
+	"	uniform vec4 hdPlace; // xy: the picture's origin in page texels, zw: 1 / its size\n"\
+	"	vec4 hdTextureSample(vec2 P) {\n"\
+	"		vec4 hd = texture2D(s_hd, (P - hdPlace.xy) * hdPlace.zw);\n"\
+	"		if (hd.a < 0.5) { discard; }\n"\
+	"		vec2 rg = samplePSX(P);\n"\
+	"		float stp = (rg.x + rg.y == 0.0) ? 0.0 : lut(rg).w;\n"\
+	"		return vec4(hd.rgb, 1.0 - stp);\n"\
+	"	}\n"\
 	"	void main() {\n"\
-	"		vec4 color = (bilinearFilter > 0) ? bilinearTextureSample(v_texcoord.xy) : nearestTextureSample(v_texcoord.xy);\n"\
+	"		vec4 color = (hdEnabled > 0) ? hdTextureSample(v_texcoord.xy) : (bilinearFilter > 0) ? bilinearTextureSample(v_texcoord.xy) : nearestTextureSample(v_texcoord.xy);\n"\
 	"		if (stpPass == 1 && color.a < 0.75) { discard; }\n"\
 	"		if (stpPass == 2 && color.a >= 0.75) { discard; }\n"\
 	"		fragColor = dither(color * v_color);\n"\
@@ -1157,6 +1169,11 @@ void GR_GenerateCommonTextures()
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &whitePixelData);
 
 		glBindTexture(GL_TEXTURE_2D, 0);
+
+		// lain: the HD sampler (unit 2) always has a texture, even before the first HD draw
+		glActiveTexture(GL_TEXTURE2);
+		glBindTexture(GL_TEXTURE_2D, g_whiteTexture);
+		glActiveTexture(GL_TEXTURE0);
 	}
 
 	glGenTextures(1, &g_rgLutTexture);
@@ -1200,6 +1217,16 @@ void GR_CompilePSXShader(PSXGPU_Shader* sh, const char* source)
 #if USE_OPENGL
 	sh->bilinearFilterLoc = glGetUniformLocation(sh->shader, "bilinearFilter");
 	sh->stpPassLoc = glGetUniformLocation(sh->shader, "stpPass");
+	sh->hdEnabledLoc = glGetUniformLocation(sh->shader, "hdEnabled");
+	sh->hdPlaceLoc = glGetUniformLocation(sh->shader, "hdPlace");
+	/* lain: each sampler's texture unit, once (GR_SetTexture skips this when the texture doesn't change) */
+	GLint previous = 0;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &previous);
+	glUseProgram(sh->shader);
+	glUniform1i(glGetUniformLocation(sh->shader, "s_texture"), 0);
+	glUniform1i(glGetUniformLocation(sh->shader, "s_rgLut"), 1);
+	glUniform1i(glGetUniformLocation(sh->shader, "s_hd"), 2);
+	glUseProgram(previous);
 	sh->projectionLoc = glGetUniformLocation(sh->shader, "Projection");
 	sh->texelSizeLoc = glGetUniformLocation(sh->shader, "texelSize");
 	sh->texLoc = glGetUniformLocation(sh->shader, "s_texture");
@@ -1515,8 +1542,43 @@ void GR_SetShader(const ShaderID shader)
 }
 
 
-// lain: STP pass uniform of the shader GR_SetTexture last selected
+// lain: STP pass and HD uniforms of the shader GR_SetTexture last selected
 static GLint s_stpPassLoc = -1;
+static GLint s_hdEnabledLoc = -1, s_hdPlaceLoc = -1;
+
+/* HD replacement for the next draw (lain_hd.h); texture 0 turns it off. */
+void GR_SetHD(unsigned int texture, float ox, float oy, float inv_w, float inv_h)
+{
+	if (s_hdEnabledLoc == -1)
+		return;
+	glUniform1i(s_hdEnabledLoc, texture != 0);
+	if (!texture)
+		return;
+	glUniform4f(s_hdPlaceLoc, ox, oy, inv_w, inv_h);
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, texture);
+	glActiveTexture(GL_TEXTURE0);
+}
+
+extern "C" unsigned int GR_CreateHDTexture(int width, int height, const unsigned char* rgba)
+{
+	GLint bound = 0, unit = 0;
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &unit);
+	glActiveTexture(GL_TEXTURE2);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+	GLuint tex;
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+	glGenerateMipmap(GL_TEXTURE_2D);
+	glBindTexture(GL_TEXTURE_2D, bound);
+	glActiveTexture(unit);
+	return tex;
+}
 
 void GR_SetStpPass(int pass)
 {
@@ -1535,6 +1597,8 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		GR_SetShader(g_gpu_shader_4.shader);
 		bilinearFilterLoc = g_gpu_shader_4.bilinearFilterLoc;
 		s_stpPassLoc = g_gpu_shader_4.stpPassLoc;
+		s_hdEnabledLoc = g_gpu_shader_4.hdEnabledLoc;
+		s_hdPlaceLoc = g_gpu_shader_4.hdPlaceLoc;
 		u_projectionLoc = g_gpu_shader_4.projectionLoc;
 		u_projection3DLoc = g_gpu_shader_4.projection3DLoc;
 		texLoc = g_gpu_shader_4.texLoc;
@@ -1545,6 +1609,8 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		GR_SetShader(g_gpu_shader_8.shader);
 		bilinearFilterLoc = g_gpu_shader_8.bilinearFilterLoc;
 		s_stpPassLoc = g_gpu_shader_8.stpPassLoc;
+		s_hdEnabledLoc = g_gpu_shader_8.hdEnabledLoc;
+		s_hdPlaceLoc = g_gpu_shader_8.hdPlaceLoc;
 		u_projectionLoc = g_gpu_shader_8.projectionLoc;
 		u_projection3DLoc = g_gpu_shader_8.projection3DLoc;
 		texLoc = g_gpu_shader_8.texLoc;
@@ -1555,6 +1621,8 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		GR_SetShader(g_gpu_shader_16.shader);
 		bilinearFilterLoc = g_gpu_shader_16.bilinearFilterLoc;
 		s_stpPassLoc = g_gpu_shader_16.stpPassLoc;
+		s_hdEnabledLoc = g_gpu_shader_16.hdEnabledLoc;
+		s_hdPlaceLoc = g_gpu_shader_16.hdPlaceLoc;
 		u_projectionLoc = g_gpu_shader_16.projectionLoc;
 		u_projection3DLoc = g_gpu_shader_16.projection3DLoc;
 		texLoc = g_gpu_shader_16.texLoc;
@@ -1569,6 +1637,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		texLoc = g_gpu_shader_32_rgba.texLoc;
 		lutLoc = -1;
 		s_stpPassLoc = -1;
+		s_hdEnabledLoc = s_hdPlaceLoc = -1;
 		u_texelSizeLoc = g_gpu_shader_32_rgba.texelSizeLoc;
 		break;
 	}
@@ -1625,6 +1694,7 @@ void GR_DestroyTexture(TextureID texture)
 void GR_ClearVRAM(int x, int y, int w, int h, unsigned char r, unsigned char g, unsigned char b)
 {
 	vram_need_update = 1;
+	LainHD_NoteWrite(x, y, w, h); // lain
 
 	u_short* dst = vram + x + y * VRAM_WIDTH;
 
@@ -1715,6 +1785,7 @@ void GR_SaveVRAM(const char* outputFileName, int x, int y, int width, int height
 
 void GR_CopyRGBAFramebufferToVRAM(u_int* src, int x, int y, int w, int h, int update_vram, int flip_y)
 {
+	LainHD_NoteWrite(x, y, w, h); // lain
 	assert(x >= 0);
 	assert(y >= 0);
 	assert(x + w <= VRAM_WIDTH);
@@ -1998,6 +2069,7 @@ void GR_CopyVRAM(unsigned short* src, int x, int y, int w, int h, int dst_x, int
 		dst += VRAM_WIDTH;
 		src += stride;
 	}
+	LainHD_NoteUpload(dst_x, dst_y, w, h); // lain
 }
 
 void GR_ReadVRAM(unsigned short* dst, int x, int y, int dst_w, int dst_h)

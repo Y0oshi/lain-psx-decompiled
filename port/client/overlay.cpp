@@ -12,6 +12,8 @@
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_sdl2.h"
+#include "modrt.h"
+#include "mods.h"
 #include "packs.h"
 
 #include <string>
@@ -290,9 +292,11 @@ static void draw_menu(const ImGuiViewport *vp) {
             }
             ImGui::EndTabItem();
         }
-        // Tests/docs: LAIN_MENU_TAB=cheats opens the menu on that tab.
+        // Tests/docs: LAIN_MENU_TAB=cheats or LAIN_MENU_TAB=mods opens the menu on that tab.
         static bool tab_forced;
-        const bool force_cheats = !tab_forced && SDL_getenv("LAIN_MENU_TAB") && !strcmp(SDL_getenv("LAIN_MENU_TAB"), "cheats");
+        const char *want_tab = tab_forced ? nullptr : SDL_getenv("LAIN_MENU_TAB");
+        const bool force_cheats = want_tab && !strcmp(want_tab, "cheats");
+        const bool force_mods = want_tab && !strcmp(want_tab, "mods");
         tab_forced = true;
         if (ImGui::BeginTabItem("Cheats", nullptr, force_cheats ? ImGuiTabItemFlags_SetSelected : 0)) {
             ImGui::TextDisabled("Cheats change how the game runs, not your saves.");
@@ -337,6 +341,27 @@ static void draw_menu(const ImGuiViewport *vp) {
             ImGui::Text("Poison waves   %3d ", g_screensaver_count);
             ImGui::SameLine();
             ImGui::TextDisabled("screensavers");
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Mods", nullptr, force_mods ? ImGuiTabItemFlags_SetSelected : 0)) {
+            const std::vector<ModActive> &active = mods_active();
+            if (active.empty()) {
+                ImGui::TextDisabled("No mods are on.");
+            }
+            for (const ModActive &m : active) {
+                ImGui::BulletText("%s%s%s", m.name.c_str(), m.version.empty() ? "" : "  ", m.version.c_str());
+                char detail[128];
+                int n = snprintf(detail, sizeof detail, "%d file%s", m.files, m.files == 1 ? "" : "s");
+                if (m.overridden) n += snprintf(detail + n, sizeof detail - n, ", %d replaced by later mods", m.overridden);
+                if (m.skipped) snprintf(detail + n, sizeof detail - n, ", %d skipped", m.skipped);
+                ImGui::SameLine();
+                ImGui::TextDisabled("(%s)", detail);
+            }
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("Mods are chosen on the launcher's Mods tab and apply when the game starts.");
+            ImGui::PopStyleColor();
+            modrt_menu(); /* each mod's settings and log */
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -440,7 +465,7 @@ extern "C" void overlay_draw(void) {
     if (s_text[0] && SDL_GetPerformanceCounter() >= s_until) {
         s_text[0] = 0;
     }
-    if (!s_text[0] && !s_sub[0] && !s_menu) {
+    if (!s_text[0] && !s_sub[0] && !s_menu && !modrt_wants_draw()) {
         return;
     }
     if (!s_ready) {
@@ -465,6 +490,7 @@ extern "C" void overlay_draw(void) {
     if (s_sub[0]) {
         draw_subtitle(vp);
     }
+    modrt_draw(); /* mod windows and overlays */
     if (s_menu) {
         draw_menu(vp);
     }

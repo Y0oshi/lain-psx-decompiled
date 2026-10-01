@@ -1,4 +1,5 @@
 #include "PsyX_GPU.h"
+#include "lain_hd.h"
 
 #include "PsyX/PsyX_public.h"
 #include "PsyX/PsyX_globals.h"
@@ -51,6 +52,8 @@ struct GPUDrawSplit
 	u_short			numVerts;
 
 	const char*		debugText;
+
+	LainHDMatch		hd;	// lain: HD replacement texture (lain_hd.h)
 };
 
 #define MAX_DRAW_SPLITS	 4096
@@ -685,6 +688,30 @@ void TriangulateQuad()
 //------------------------------------------------------------------------------------------------------------------------
 
 void GR_SetStpPass(int pass); // lain: PsyX_render.cpp
+void GR_SetHD(unsigned int texture, float ox, float oy, float inv_w, float inv_h); // lain: PsyX_render.cpp
+
+// lain: the HD replacement for the next textured primitive, set before AddSplit
+static LainHDMatch s_hdNext;
+
+static void HDNextPoly(int tpage, int clut, const u_char* uv, int n, int stride)
+{
+	int umin = 255, vmin = 255, umax = 0, vmax = 0;
+	for (int i = 0; i < n; i++)
+	{
+		int u = uv[i * stride], v = uv[i * stride + 1];
+		if (u < umin) umin = u;
+		if (u > umax) umax = u;
+		if (v < vmin) vmin = v;
+		if (v > vmax) vmax = v;
+	}
+	LainHD_Match(tpage, clut, umin, vmin, umax, vmax, &s_hdNext);
+}
+
+static void HDNextRect(int tpage, int clut, int u, int v, int w, int h)
+{
+	int u1 = u + w - 1, v1 = v + h - 1;
+	LainHD_Match(tpage, clut, u, v, u1 > 255 ? 255 : u1, v1 > 255 ? 255 : v1, &s_hdNext);
+}
 
 static void AddSplit(bool semiTrans, bool textured)
 {
@@ -694,6 +721,8 @@ static void AddSplit(bool semiTrans, bool textured)
 	BlendMode blendMode = semiTrans ? GET_TPAGE_BLEND(tpage) : BM_NONE;
 	TexFormat texFormat = GET_TPAGE_FORMAT(tpage);
 	TextureID textureId = textured ? g_vramTexture : g_whiteTexture;
+	LainHDMatch hd = textured ? s_hdNext : LainHDMatch{};
+	s_hdNext.texture = 0;
 
 	if (textured && overrideTexture != 0)
 	{
@@ -712,7 +741,10 @@ static void AddSplit(bool semiTrans, bool textured)
 		curSplit.drawenv.clip.w == activeDrawEnv.clip.w &&
 		curSplit.drawenv.clip.h == activeDrawEnv.clip.h &&
 		curSplit.drawenv.dfe == activeDrawEnv.dfe &&
-		curSplit.debugText == currentSplitDebugText)
+		curSplit.debugText == currentSplitDebugText &&
+		curSplit.hd.texture == hd.texture &&
+		(!hd.texture || (curSplit.hd.origin_x == hd.origin_x && curSplit.hd.origin_y == hd.origin_y &&
+			curSplit.hd.inv_w == hd.inv_w && curSplit.hd.inv_h == hd.inv_h)))
 	{
 		return;
 	}
@@ -733,6 +765,7 @@ static void AddSplit(bool semiTrans, bool textured)
 	split.drawenv = activeDrawEnv;
 	split.dispenv = activeDispEnv;
 	split.debugText = currentSplitDebugText;
+	split.hd = hd;
 
 	split.drawenv.tw.w = overrideTextureWidth;
 	split.drawenv.tw.h = overrideTextureHeight;
@@ -749,6 +782,8 @@ void DrawSplit(const GPUDrawSplit& split)
 	GR_SetStencilMode(split.drawPrimMode);	// draw with mask 0x16
 
 	GR_SetTexture(split.textureId, split.texFormat);
+	if (split.hd.texture) // lain
+		GR_SetHD(split.hd.texture, split.hd.origin_x, split.hd.origin_y, split.hd.inv_w, split.hd.inv_h);
 
 	if (split.texFormat == TF_32_BIT_RGBA)
 		GR_SetOverrideTextureSize(split.drawenv.tw.w, split.drawenv.tw.h);
@@ -777,6 +812,8 @@ void DrawSplit(const GPUDrawSplit& split)
 		GR_SetBlendMode(split.blendMode);
 		GR_DrawTriangles(split.startVertex, split.numVerts / 3);
 	}
+	if (split.hd.texture) // lain: the shader draws without HD again
+		GR_SetHD(0, 0, 0, 0, 0);
 
 	if (split.debugText)
 		GR_PopDebugLabel();
@@ -1165,6 +1202,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 		// It is an official hack from SCE devs to not use DR_TPAGE and instead use null polygon
 		if (!IsNull(poly))
 		{
+			HDNextPoly(poly->tpage, poly->clut, &poly->u0, 3, 8); // lain
 			AddSplit(semiTrans, true);
 
 			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
@@ -1203,6 +1241,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 	{
 		POLY_FT4* poly = (POLY_FT4*)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
+		HDNextPoly(poly->tpage, poly->clut, &poly->u0, 4, 8); // lain
 
 		AddSplit(semiTrans, true);
 
@@ -1260,6 +1299,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 	{
 		POLY_GT3* poly = (POLY_GT3*)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
+		HDNextPoly(poly->tpage, poly->clut, &poly->u0, 3, 12); // lain
 
 		AddSplit(semiTrans, true);
 
@@ -1299,6 +1339,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 	{
 		POLY_GT4* poly = (POLY_GT4*)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
+		HDNextPoly(poly->tpage, poly->clut, &poly->u0, 4, 12); // lain
 
 		AddSplit(semiTrans, true);
 
@@ -1359,6 +1400,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	case 0x64:
 	{
 		SPRT* poly = (SPRT*)polyTag;
+		HDNextRect(activeDrawEnv.tpage, poly->clut, poly->u0, poly->v0, poly->w, poly->h); // lain
 
 		AddSplit(semiTrans, true);
 
@@ -1419,6 +1461,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	case 0x74:
 	{
 		SPRT_8* poly = (SPRT_8*)polyTag;
+		HDNextRect(activeDrawEnv.tpage, poly->clut, poly->u0, poly->v0, 8, 8); // lain
 
 		AddSplit(semiTrans, true);
 
@@ -1459,6 +1502,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	case 0x7C:
 	{
 		SPRT_16* poly = (SPRT_16*)polyTag;
+		HDNextRect(activeDrawEnv.tpage, poly->clut, poly->u0, poly->v0, 16, 16); // lain
 
 		AddSplit(semiTrans, true);
 

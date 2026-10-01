@@ -610,6 +610,11 @@ static int default_reader(int lba, u_char *raw, void *user)
     return ok;
 }
 
+int LainCD_ReadImageSector(int lba, u_char *raw2352)
+{
+    return default_reader(lba, raw2352, NULL);
+}
+
 void LainCD_SetSectorReader(LainCD_SectorReader reader, void *user)
 {
     cd_early_init();

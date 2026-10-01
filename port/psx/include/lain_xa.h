@@ -168,6 +168,10 @@ void LainCD_SetSectorReader(LainCD_SectorReader reader, void *user);
 /* Reads one raw sector through the current reader (any thread). */
 int LainCD_ReadRawSector(int lba, u_char *raw2352);
 
+/* lain: reads one raw sector straight from the disc image, bypassing the
+ * reader (for a reader that changes what the disc holds, such as mods). */
+int LainCD_ReadImageSector(int lba, u_char *raw2352);
+
 /* Data-only reads (RT off) may run faster than real time: 1 = real speed
  * (default), N = N times faster, 0 = as fast as the game consumes them.
  * Reads with CdlModeRT set always run at the real 75/150 sectors per second. */

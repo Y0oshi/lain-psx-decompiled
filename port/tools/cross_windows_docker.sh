@@ -6,7 +6,7 @@
 set -u
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null 2>&1
-apt-get install -y -qq mingw-w64 cmake ninja-build curl unzip >/dev/null 2>&1
+apt-get install -y -qq mingw-w64 cmake ninja-build curl unzip python3 >/dev/null 2>&1
 cd /opt
 curl -sSL https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-mingw.tar.gz | tar xz
 curl -sSL -o oal.zip https://github.com/kcat/openal-soft/releases/download/1.25.2/openal-soft-1.25.2-bin.zip && unzip -q oal.zip

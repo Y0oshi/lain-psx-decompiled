@@ -10,6 +10,8 @@
 #include <exception>
 
 #include "iso.h"
+#include "napk.h"
+#include "tim.h"
 
 namespace {
 
@@ -62,101 +64,32 @@ std::vector<uint8_t> entry(const std::vector<uint8_t> &exe, uint32_t table, cons
     return std::vector<uint8_t>(archive.begin() + start, archive.begin() + start + size);
 }
 
-/* "napk" LZ: flag byte per 8 items, MSB first; set bit = copy (offset+1, length+3). */
+/* An archive entry unpacked (entries that aren't napk-packed come back as they are). */
 std::vector<uint8_t> unnapk(const std::vector<uint8_t> &src) {
-    if (src.size() < 8 || memcmp(src.data(), "napk", 4) != 0) {
+    if (!napk_is_packed(src.data(), src.size())) {
         return src;
     }
-    size_t remaining = rd32(src, 4);
-    if (remaining > (16u << 20)) return {};  // no archive entry is this big: corrupt
+    size_t n = 0;
+    uint8_t *p = napk_unpack(src.data(), src.size(), &n);
     std::vector<uint8_t> out;
-    out.reserve(remaining);
-    size_t p = 8;
-    while (p < src.size() && remaining > 0) {
-        uint8_t flags = src[p++];
-        for (int bit = 0; bit < 8 && p < src.size() && remaining > 0; bit++) {
-            if (flags & (0x80 >> bit)) {
-                if (p + 1 >= src.size()) break;
-                size_t back = src[p] + 1u, len = src[p + 1] + 3u;
-                p += 2;
-                if (back > out.size()) return out;  // corrupt: reference before the start
-                for (size_t k = 0; k < len; k++) out.push_back(out[out.size() - back]);
-                remaining -= std::min(remaining, len);
-            } else {
-                out.push_back(src[p++]);
-                remaining -= remaining > 0;
-            }
-        }
+    if (p) {
+        out.assign(p, p + n);
+        free(p);
     }
     return out;
 }
 
-uint32_t rgba15(uint16_t v, bool transparent_black) {
-    uint32_t r = (v & 31) << 3, g = ((v >> 5) & 31) << 3, b = ((v >> 10) & 31) << 3;
-    uint32_t a = (v == 0 && transparent_black) ? 0 : 255;
-    return r | g << 8 | b << 16 | a << 24;
-}
-
 /* PlayStation TIM (4/8/16/24-bit) -> RGBA; the image may follow a small header. */
-bool decode_tim(std::vector<uint8_t> t, GalleryItem &item, int clut_index = 0) {
-    for (size_t off : {0u, 4u, 8u}) {
-        if (rd32(t, off) == 0x10) {
-            t.erase(t.begin(), t.begin() + off);
-            break;
-        }
-    }
-    if (rd32(t, 0) != 0x10) return false;
-    uint32_t flag = rd32(t, 4);
-    size_t p = 8;
-    std::vector<uint16_t> clut;
-    if ((flag & 7) == 3) {  // 24-bit, stored as three bytes per pixel
-        uint16_t pw = rd16(t, 16), ph = rd16(t, 18);
-        int w = pw * 2 / 3, h = ph;
-        if ((size_t)20 + (size_t)w * h * 3 > t.size()) return false;
-        std::vector<uint32_t> px((size_t)w * h);
-        for (size_t i = 0; i < px.size(); i++) {
-            const uint8_t *c = &t[20 + i * 3];
-            px[i] = c[0] | c[1] << 8 | c[2] << 16 | 0xFFu << 24;
-        }
-        item.w = w;
-        item.h = h;
-        item.frames.push_back(std::move(px));
-        return true;
-    }
-    if (flag & 8) {
-        uint32_t len = rd32(t, p);
-        uint16_t cw = rd16(t, p + 8), ch = rd16(t, p + 10);
-        size_t n = (size_t)cw * ch;
-        if (n > 4096 || p + 12 + n * 2 > t.size() || len < 12) return false;
-        for (size_t i = 0; i < n; i++) clut.push_back(rd16(t, p + 12 + 2 * i));
-        p += len;
-    }
-    uint32_t len = rd32(t, p);
-    uint16_t pw = rd16(t, p + 8), ph = rd16(t, p + 10);
-    size_t data = p + 12;
-    if (data + (size_t)len - 12 > t.size() || len < 12) return false;
-    int bpp = flag & 3;
-    int w = bpp == 0 ? pw * 4 : bpp == 1 ? pw * 2 : pw;
-    if (w == 0 || ph == 0 || w > 1024 || ph > 512 || data + (size_t)pw * ph * 2 > t.size()) return false;
-    std::vector<uint32_t> px((size_t)w * ph);
-    for (int y = 0; y < ph; y++) {
-        for (int x = 0; x < w; x++) {
-            uint16_t v;
-            if (bpp == 0) {
-                uint8_t b = t[data + (size_t)y * pw * 2 + x / 2];
-                size_t ci = (size_t)clut_index * 16 + ((x & 1) ? b >> 4 : b & 15);
-                v = ci < clut.size() ? clut[ci] : 0;
-            } else if (bpp == 1) {
-                size_t ci = (size_t)clut_index * 256 + t[data + (size_t)y * pw * 2 + x];
-                v = ci < clut.size() ? clut[ci] : 0;
-            } else {
-                v = rd16(t, data + ((size_t)y * pw + x) * 2);
-            }
-            px[(size_t)y * w + x] = rgba15(v, true);
-        }
-    }
-    item.w = w;
-    item.h = ph;
+bool decode_tim(const std::vector<uint8_t> &t, GalleryItem &item) {
+    TimInfo ti;
+    if (!tim_parse(t.data(), t.size(), &ti)) return false;
+    uint8_t *rgba = tim_to_rgba(t.data(), t.size(), &ti, 0);
+    if (!rgba) return false;
+    std::vector<uint32_t> px((size_t)ti.w * ti.h);
+    memcpy(px.data(), rgba, px.size() * 4);
+    free(rgba);
+    item.w = ti.w;
+    item.h = ti.h;
     item.frames.push_back(std::move(px));
     return true;
 }

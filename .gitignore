@@ -28,3 +28,8 @@ dist/
 
 # objdiff-cli (tools/get_objdiff.sh)
 tools/bin/
+
+# built example plugins
+port/mod_examples/*/plugins/*.dylib
+port/mod_examples/*/plugins/*.dll
+port/mod_examples/*/plugins/*.so

@@ -1,0 +1,5 @@
+{
+  // "labels" are the info lines next to a node; "text" the keywords.
+  // Name one by its text (spaces and underscores match) or by number.
+  "labels": { "COUNSELING REC.": "MODDED RECORD" }
+}
