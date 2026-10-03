@@ -12,6 +12,8 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
 </p>
 
+<p align="center">English | <a href="README.ja.md">日本語</a></p>
+
 This is a **decompilation** of ***Serial Experiments Lain*** (PlayStation, Pioneer LDC, 1998)
 and a **native client** for Windows, macOS and Linux built from it.
 
